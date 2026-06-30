@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+from .embeddings import Embedder
+from .llm import LLMClient
+from .memory.forgetting import run_pruning
+from .memory.reflection import run_reflection
+from .memory.store import MemoryStore
+
+log = logging.getLogger(__name__)
+
+
+class BackgroundJobs:
+    """Periodic memory maintenance: pruning (forget) and reflection (grow) (DESIGN.md §7).
+
+    Dependency-free asyncio loops rather than apscheduler. Each loop sleeps first, so a fresh
+    process doesn't immediately churn an empty store.
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore,
+        llm: LLMClient,
+        embedder: Embedder,
+        *,
+        prune_interval_hours: float,
+        reflect_interval_hours: float,
+        retention_threshold: float,
+        max_delete_ratio: float,
+        half_life_base_days: float,
+        forget_mode: str,
+        reflect_min_episodics: int,
+        ingest_model: str,
+    ) -> None:
+        self._store = store
+        self._llm = llm
+        self._embedder = embedder
+        self._prune_interval = prune_interval_hours * 3600
+        self._reflect_interval = reflect_interval_hours * 3600
+        self._retention_threshold = retention_threshold
+        self._max_delete_ratio = max_delete_ratio
+        self._half_life_base_days = half_life_base_days
+        self._forget_mode = forget_mode
+        self._reflect_min_episodics = reflect_min_episodics
+        self._ingest_model = ingest_model
+        self._tasks: list[asyncio.Task] = []
+
+    def start(self) -> None:
+        self._tasks = [
+            asyncio.create_task(self._loop("pruning", self._prune_interval, self._prune)),
+            asyncio.create_task(self._loop("reflection", self._reflect_interval, self._reflect)),
+        ]
+        log.info("background jobs started (prune/%.0fh, reflect/%.0fh)",
+                 self._prune_interval / 3600, self._reflect_interval / 3600)
+
+    async def stop(self) -> None:
+        for t in self._tasks:
+            t.cancel()
+
+    async def _loop(self, name: str, interval: float, job) -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await job()
+                log.info("memory stats after %s: %s", name, self._store.stats())
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("%s job crashed; continuing", name)
+
+    async def _prune(self) -> None:
+        await run_pruning(
+            self._store,
+            now=time.time(),
+            threshold=self._retention_threshold,
+            max_delete_ratio=self._max_delete_ratio,
+            half_life_base_days=self._half_life_base_days,
+            mode=self._forget_mode,
+            llm=self._llm,
+            embedder=self._embedder,
+            blur_model=self._ingest_model,
+        )
+
+    async def _reflect(self) -> None:
+        await run_reflection(
+            self._llm,
+            self._store,
+            self._embedder,
+            now=time.time(),
+            min_episodics=self._reflect_min_episodics,
+            model=self._ingest_model,
+        )

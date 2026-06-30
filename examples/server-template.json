@@ -1,0 +1,28 @@
+{
+  "roles": [
+    {
+      "name": "운영진",
+      "permissions": ["manage_channels", "manage_roles", "kick_members", "ban_members", "moderate_members"]
+    },
+    { "name": "멤버", "permissions": [] }
+  ],
+  "categories": [
+    {
+      "name": "2026-summer",
+      "private": true,
+      "visible_to": ["운영진", "멤버"],
+      "channels": [
+        { "name": "공지", "type": "text" },
+        { "name": "일반", "type": "text" },
+        { "name": "회의", "type": "voice" }
+      ]
+    },
+    {
+      "name": "잡담",
+      "channels": [
+        { "name": "수다", "type": "text" },
+        { "name": "음성-라운지", "type": "voice" }
+      ]
+    }
+  ]
+}

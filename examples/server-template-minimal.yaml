@@ -1,0 +1,7 @@
+# 가장 작은 템플릿 — 카테고리 1개 + 채널 2개. 복사해서 이름만 바꿔 쓰세요.
+categories:
+  - name: 새-프로젝트
+    channels:
+      - name: 일반          # type 생략 → 텍스트 채널
+      - name: 음성
+        type: voice

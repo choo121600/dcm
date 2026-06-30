@@ -1,0 +1,849 @@
+from __future__ import annotations
+
+import logging
+import time
+
+import discord
+
+from .base import (
+    BufferedMessage,
+    ChatPlatform,
+    GuildAdmin,
+    IncomingMessage,
+    MentionHandler,
+    is_admin,
+)
+from ..service import guild_admin as policy
+
+log = logging.getLogger(__name__)
+
+DISCORD_MAX = 2000
+
+# 봇 이름으로 호명할 때 붙는 한국어 호격 조사 (지우야/지우아/지우님/지우씨).
+_VOCATIVE = "야아님씨"
+# 이름만으로 부를 때 이름 뒤에 올 수 있는 경계 문자 ("지우 안녕", "지우!", "지우?").
+_NAME_BOUNDARY = " \t\n\r!?.,~…:;"
+
+# 서버 템플릿 첨부 처리 (NL 경로): 허용 확장자 / 최대 크기 / 셋업 의도 키워드.
+_TEMPLATE_EXTS = (".yaml", ".yml", ".json")
+_TEMPLATE_MAX_BYTES = 256 * 1024
+_SETUP_INTENT_WORDS = (
+    "세팅", "셋업", "set up", "setup", "적용", "템플릿", "template",
+    "구성", "세트업", "블루프린트", "blueprint", "만들어",
+)
+
+
+def split_for_discord(text: str, limit: int = DISCORD_MAX) -> list[str]:
+    """Split text into chunks that fit Discord's per-message limit, preferring line breaks."""
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+        current += line
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
+class PycordAdapter(ChatPlatform, GuildAdmin):
+    """Pycord implementation of ChatPlatform (DESIGN.md §3). The only module that imports discord."""
+
+    def __init__(
+        self,
+        token: str,
+        bot_name: str,
+        buffer_size: int = 12,
+        cooldown_seconds: float = 3.0,
+        guild_id: int = 0,
+        admin_role_id: int = 0,
+        onboarding_policy=None,
+    ) -> None:
+        self._token = token
+        self._bot_name = bot_name
+        self._buffer_size = buffer_size
+        self._cooldown = cooldown_seconds
+        self._guild_id = guild_id  # guild for guild-scoped slash registration (ralplan S1/S2)
+        self._admin_role_id = admin_role_id  # designated ADMIN_ROLE for the InvokerCheck (S2)
+        self._last_seen: dict[str, float] = {}  # author_id → monotonic ts (cooldown, §14.4)
+        self._handler: MentionHandler | None = None
+        self._service = None  # GuildAdmin policy service, wired in register_admin_commands (S2)
+        self._pending = policy.PendingConfirmations()  # adapter-local confirm-token carry (S2)
+        self._admin_commands: list[str] = []  # registry for the by-construction InvokerCheck test
+        self._rl = policy.RateLimiter()  # additive burst-smoothing over pycord 429 handling (S6)
+        self._onboarding = onboarding_policy  # OnboardingPolicy 인스턴스 (S6 온보딩)
+
+        intents = discord.Intents.default()
+        # Privileged — must also be enabled in the Developer Portal (DESIGN.md §14.2).
+        intents.message_content = True
+        intents.members = True  # on_member_join 발화에 필요 (S6 온보딩; Developer Portal에서도 활성화 필요)
+        # discord.Bot (subclass of Client) so application/slash commands register & auto-sync.
+        # Bot preserves the inherited mention path (on_message/get_channel/start/user) — ralplan S1.
+        self._client = discord.Bot(intents=intents)
+        self._client.event(self.on_ready)
+        self._client.event(self.on_message)
+        self._client.event(self.on_member_join)
+
+    def on_mention(self, handler: MentionHandler) -> None:
+        self._handler = handler
+
+    @property
+    def pending(self):
+        """Adapter-local pending high-risk confirmations (shared with the policy service, S2)."""
+        return self._pending
+
+    async def on_ready(self) -> None:
+        log.info("%s online as %s", self._bot_name, self._client.user)
+        # cutover 확인용: privileged intent 활성 여부를 운영자가 로그에서 검증(DESIGN.md §14.2, S7).
+        intents = self._client.intents
+        log.info("privileged intent message_content=%s", intents.message_content)
+        log.info("privileged intent members=%s", intents.members)
+
+    async def on_message(self, message: discord.Message) -> None:
+        # Ignore self and other bots.
+        if message.author.bot or message.author == self._client.user:
+            return
+        # 호출 감지: @멘션 / 봇 메시지 reply / 메시지 이름 호명("지우야 …", "안녕 지우야").
+        # 이름 호명은 스팸을 억제하면서 자연스러운 호명을 허용 (DESIGN.md §14.4; persona.md 예시).
+        if not self._is_addressed(message):
+            return
+
+        # Per-user cooldown to curb spam / cost (DESIGN.md §14.4).
+        author_id = str(message.author.id)
+        now = time.monotonic()
+        last = self._last_seen.get(author_id)
+        if last is not None and now - last < self._cooldown:
+            return
+        self._last_seen[author_id] = now
+
+        # 서버 템플릿 첨부(.yaml/.json) + 셋업 의도 → 운영진/주인 한정 템플릿 적용 경로로 분기.
+        attachment = self._template_attachment(message)
+        if attachment is not None and self._wants_setup(self._strip_mentions(message)):
+            await self._handle_template_attachment(message, attachment)
+            return
+
+        if self._handler is None:
+            return
+
+        incoming = IncomingMessage(
+            channel_id=str(message.channel.id),
+            author_id=str(message.author.id),
+            author_name=message.author.display_name,
+            content=self._strip_mentions(message),
+            role_ids=self._role_ids(message.author),
+            is_owner=self._is_owner(message),
+        )
+        buffer = await self._history(message.channel, self._buffer_size)
+
+        try:
+            async with message.channel.typing():
+                reply = await self._handler(incoming, buffer)
+        except Exception:
+            log.exception("mention handler failed")
+            reply = None
+
+        if reply:
+            await self._send_to(message.channel, reply)
+
+    async def on_member_join(self, member) -> None:
+        """신규 멤버 입장 이벤트 핸들러 (S6 온보딩).
+
+        OnboardingPolicy.decide()로 동작을 결정한 뒤:
+        - welcome_channel_id가 설정돼 있으면 해당 채널에 welcome_text를 전송한다.
+        - default_role_id가 설정돼 있으면 멤버에게 해당 역할을 부여한다.
+        예외는 log.exception으로 기록하되 봇이 죽지 않도록 침묵 degrade한다.
+        """
+        if self._onboarding is None:
+            return
+        if getattr(member, "bot", False):
+            return  # 봇 입장에는 온보딩하지 않음 (S6)
+
+        try:
+            decision = self._onboarding.decide(member.display_name)
+        except Exception:
+            log.exception("on_member_join: 온보딩 결정 실패 (침묵 degrade)")
+            return
+
+        # 환영 메시지와 역할 부여를 독립 try로 분리 — 한쪽 실패가 다른 쪽을 막지 않게 한다.
+        if decision.welcome_channel_id is not None and decision.welcome_text is not None:
+            try:
+                channel = self._client.get_channel(decision.welcome_channel_id)
+                if channel is not None:
+                    await channel.send(decision.welcome_text)
+                else:
+                    log.warning(
+                        "on_member_join: welcome 채널 %d을 찾을 수 없음",
+                        decision.welcome_channel_id,
+                    )
+            except Exception:
+                log.exception("on_member_join: welcome 메시지 전송 실패 (침묵 degrade)")
+
+        if decision.default_role_id is not None:
+            try:
+                guild = getattr(member, "guild", None)
+                if guild is not None:
+                    role = guild.get_role(decision.default_role_id)
+                    if role is not None:
+                        await member.add_roles(role, reason="온보딩 자동 역할 부여 (S6)")
+                    else:
+                        log.warning(
+                            "on_member_join: default_role %d을 찾을 수 없음",
+                            decision.default_role_id,
+                        )
+            except Exception:
+                log.exception("on_member_join: 자동 역할 부여 실패 (침묵 degrade)")
+
+    def _is_addressed(self, message: discord.Message) -> bool:
+        """메시지가 봇을 향한 것인지 판정: @멘션 / 봇 메시지 reply / 이름 호명."""
+        # 1) 직접 @멘션 (@everyone/@here는 message.mentions에 안 들어옴).
+        if self._client.user in message.mentions:
+            return True
+        # 2) 봇이 보낸 메시지에 대한 답글(reply).
+        ref = getattr(message, "reference", None)
+        resolved = getattr(ref, "resolved", None) if ref is not None else None
+        if resolved is not None and getattr(resolved, "author", None) == self._client.user:
+            return True
+        # 3) 이름으로 호명.
+        return self._name_called(message.content)
+
+    def _name_called(self, content: str) -> bool:
+        """봇 이름으로 부르는 호명이면 True.
+
+        "지우"/"지우야"/"지우님 …"/"지우 안녕"/"안녕 지우야"는 매칭하고,
+        "지우가/지우는" 같은 3인칭 언급은 제외한다 (스팸 가드).
+        """
+        name = (self._bot_name or "").strip()
+        text = (content or "").strip()
+        if not name or not text:
+            return False
+        # (a) 첫머리 호명: 이름 뒤가 끝/호격조사/경계문자.
+        if text.startswith(name):
+            rest = text[len(name):]
+            if rest == "" or rest[0] in _VOCATIVE or rest[0] in _NAME_BOUNDARY:
+                return True
+        # (b) 독립 토큰 "이름+호격조사"가 문장 어디에든("안녕 지우야").
+        idx = text.find(name)
+        while idx != -1:
+            before_ok = idx == 0 or text[idx - 1] in _NAME_BOUNDARY
+            after = text[idx + len(name):]
+            if before_ok and after and after[0] in _VOCATIVE:
+                return True
+            idx = text.find(name, idx + 1)
+        return False
+
+    def _strip_mentions(self, message: discord.Message) -> str:
+        content = message.content
+        for user in message.mentions:
+            content = content.replace(f"<@{user.id}>", "").replace(f"<@!{user.id}>", "")
+        return content.strip()
+
+    async def _history(self, channel, n: int) -> list[BufferedMessage]:
+        msgs: list[BufferedMessage] = []
+        async for m in channel.history(limit=n):
+            msgs.append(
+                BufferedMessage(
+                    author_name=m.author.display_name,
+                    content=m.clean_content,
+                    is_bot=m.author.bot,
+                )
+            )
+        msgs.reverse()  # oldest first
+        return msgs
+
+    async def _send_to(self, channel, text: str) -> None:
+        for chunk in split_for_discord(text):
+            await channel.send(chunk)
+
+    def _template_attachment(self, message):
+        """메시지의 첫 번째 서버 템플릿 첨부(.yaml/.yml/.json)를 반환, 없으면 None."""
+        for att in getattr(message, "attachments", None) or []:
+            fn = (getattr(att, "filename", "") or "").lower()
+            if fn.endswith(_TEMPLATE_EXTS):
+                return att
+        return None
+
+    @staticmethod
+    def _wants_setup(text: str) -> bool:
+        """셋업/적용 의도 키워드가 있으면 True (첨부를 템플릿으로 처리할지 판단)."""
+        low = (text or "").lower()
+        return any(w in low for w in _SETUP_INTENT_WORDS)
+
+    async def _handle_template_attachment(self, message, attachment) -> None:
+        """'지우야 + 템플릿 첨부 + 세팅' NL 경로: 운영진/주인만 미리보기→확인버튼으로 적용.
+
+        파일 내용은 오직 apply_template 파서로만 전달(데이터 전용) — 기억/페르소나에 들어가지 않음.
+        공개 메시지의 확인 버튼은 클릭자 권한을 다시 검사한다.
+        """
+        author = message.author
+        if not is_admin(self._role_ids(author), self._admin_role_id, self._is_owner(message)):
+            await self._send_to(
+                message.channel, "⛔ 서버 템플릿 적용은 운영진(관리자 역할)이나 서버 주인만 할 수 있어."
+            )
+            return
+        if self._service is None:
+            await self._send_to(message.channel, "지금은 서버 관리 기능이 꺼져 있어.")
+            return
+        if int(getattr(attachment, "size", 0) or 0) > _TEMPLATE_MAX_BYTES:
+            await self._send_to(message.channel, "템플릿 파일이 너무 커 (최대 256KB).")
+            return
+        try:
+            raw = (await attachment.read()).decode("utf-8")
+        except Exception:
+            await self._send_to(
+                message.channel, "템플릿 파일을 UTF-8 텍스트로 읽을 수 없어 (.yaml/.yml/.json)."
+            )
+            return
+        gid = int(getattr(message.guild, "id", 0) or self._guild_id)
+        an = getattr(author, "display_name", "?")
+        aid = int(getattr(author, "id", 0))
+
+        def factory(token):
+            return self._service.apply_template(
+                guild_id=gid, actor_name=an, actor_id=aid, template_text=raw, confirm_token=token
+            )
+
+        try:
+            res = await factory(None)  # 드라이런: 파싱 + 미리보기 (생성 없음)
+        except Exception:
+            log.exception("template dry-run failed")
+            await self._send_to(message.channel, "템플릿 처리 중 오류가 났어.")
+            return
+        if not res.needs_confirmation:
+            await self._send_to(message.channel, res.detail)  # 파싱 오류 또는 즉시 결과
+            return
+
+        def authorized(interaction) -> bool:
+            member = getattr(interaction, "user", None) or getattr(interaction, "author", None)
+            return is_admin(self._role_ids(member), self._admin_role_id, self._is_owner(interaction))
+
+        view = _ConfirmView(factory, res.confirmation_token, authorized=authorized)
+        await message.channel.send(
+            f"{res.detail}\n\n적용하려면 아래 '확인 실행' 버튼을 눌러줘 (운영진/주인만 가능).",
+            view=view,
+        )
+
+    # --- InvokerCheck + by-construction admin-command registration (ralplan S2) ---
+
+    @staticmethod
+    def _role_ids(member) -> frozenset[int]:
+        """Resolve a Discord member's role ids to plain data (ralplan S2)."""
+        return frozenset(int(r.id) for r in getattr(member, "roles", None) or [])
+
+    @staticmethod
+    def _is_owner(obj) -> bool:
+        """길드 주인이면 True. 메시지(on_message)와 슬래시 ctx 모두에서 동작.
+
+        디스코드 길드 owner는 본래 모든 권한을 가지므로 지정 역할과 무관하게 관리자로 취급한다.
+        DM 등 guild가 없으면 False.
+        """
+        guild = getattr(obj, "guild", None)
+        if guild is None:
+            return False
+        owner_id = getattr(guild, "owner_id", None)
+        author = getattr(obj, "author", None) or getattr(obj, "user", None)
+        author_id = getattr(author, "id", None)
+        return owner_id is not None and author_id is not None and int(owner_id) == int(author_id)
+
+    def _is_admin(self, ctx) -> bool:
+        """InvokerCheck (ralplan S2): the SOLE authz boundary. The caller must hold the
+        configured ADMIN_ROLE (admin_role_id) — replaces the jiwoo Manage-Guild check.
+        Authz is bound to Discord role membership in code, never inferred from message text;
+        @default_permissions is only a UI hint and is intentionally NOT relied on."""
+        member = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+        return is_admin(self._role_ids(member), self._admin_role_id, self._is_owner(ctx))
+
+    def admin_command(self, name: str, description: str, **kwargs):
+        """Register a guild-admin slash command with the Manage Guild InvokerCheck injected
+        by construction (ralplan S2). This is the SOLE registration path for admin commands,
+        so an unguarded admin command cannot be registered. The wrapped callback runs only
+        after the InvokerCheck passes; non-admins get an ephemeral denial."""
+        import functools
+        import inspect
+
+        def decorator(func):
+            @functools.wraps(func)
+            async def wrapped(ctx, *args, **kw):
+                if not self._is_admin(ctx):
+                    await ctx.respond("지정된 관리자 역할 보유자만 사용할 수 있어.", ephemeral=True)
+                    return None
+                return await func(ctx, *args, **kw)
+
+            wrapped.__signature__ = inspect.signature(func)  # preserve options for pycord
+            wrapped.__gjc_admin_guarded__ = True  # asserted by the by-construction test
+            self._client.slash_command(
+                name=name, description=description, guild_ids=[self._guild_id], **kwargs
+            )(wrapped)
+            self._admin_commands.append(name)
+            return wrapped
+
+        return decorator
+
+    def register_admin_commands(self, service) -> None:
+        """Wire the guild-management slash-command surface (ralplan S2+). Every command is
+        registered through admin_command so InvokerCheck is enforced by construction."""
+        self._service = service
+
+        @self.admin_command(
+            name="whoami", description="Show your dcm server-management admin status."
+        )
+        async def whoami(ctx):
+            # Only reached when InvokerCheck passed → the caller is a verified admin.
+            await ctx.respond(
+                "확인됐어. 너는 지정된 관리자 역할 보유자라 서버 관리 명령을 쓸 수 있어.",
+                ephemeral=True,
+            )
+
+        @self.admin_command(name="create-category", description="Create a category.")
+        async def create_category(ctx, name: str):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.create_category(
+                    guild_id=gid, actor_name=an, actor_id=aid, name=name
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(name="create-channel", description="Create a text or voice channel.")
+        async def create_channel(ctx, name: str, kind: str = "text", category_id: str = ""):
+            if kind not in ("text", "voice"):
+                await ctx.respond("kind는 text 또는 voice여야 해.", ephemeral=True)
+                return
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            cat = int(category_id) if category_id else None
+            await self._run_op(
+                ctx,
+                lambda t: self._service.create_channel(
+                    guild_id=gid, actor_name=an, actor_id=aid, name=name, kind=kind, category_id=cat
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(name="edit-channel", description="Rename or move a channel.")
+        async def edit_channel(ctx, channel_id: str, new_name: str = "", category_id: str = ""):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            cat = int(category_id) if category_id else None
+            await self._run_op(
+                ctx,
+                lambda t: self._service.edit_channel(
+                    guild_id=gid,
+                    actor_name=an,
+                    actor_id=aid,
+                    channel_id=int(channel_id),
+                    name=(new_name or None),
+                    category_id=cat,
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(
+            name="delete-channel", description="Delete a channel (high-risk; needs confirm:true)."
+        )
+        async def delete_channel(ctx, channel_id: str, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.delete_channel(
+                    guild_id=gid, actor_name=an, actor_id=aid, channel_id=int(channel_id), confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="create-role",
+            description="Create a role (high-risk if it carries management perms; confirm).",
+        )
+        async def create_role(ctx, name: str, permissions: int = 0, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.create_role(
+                    guild_id=gid, actor_name=an, actor_id=aid, name=name, permissions=permissions, confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="assign-role",
+            description="Assign a role to a member (high-risk if the role carries management perms).",
+        )
+        async def assign_role(ctx, user_id: str, role_id: str, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.assign_role(
+                    guild_id=gid, actor_name=an, actor_id=aid, user_id=int(user_id), role_id=int(role_id), confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(name="remove-role", description="Remove a role from a member.")
+        async def remove_role(ctx, user_id: str, role_id: str):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.remove_role(
+                    guild_id=gid, actor_name=an, actor_id=aid, user_id=int(user_id), role_id=int(role_id)
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(
+            name="set-role-permissions",
+            description="Set a role's permissions (high-risk if it includes management perms).",
+        )
+        async def set_role_permissions(ctx, role_id: str, permissions: int, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.set_role_permissions(
+                    guild_id=gid, actor_name=an, actor_id=aid, role_id=int(role_id), permissions=permissions, confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="create-project",
+            description="Create a project set: category + channels + private access role (high-risk).",
+        )
+        async def create_project(ctx, name: str, channels: str, access_role: str, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            chans = [c.strip() for c in channels.split(",") if c.strip()]
+            await self._run_op(
+                ctx,
+                lambda t: self._service.create_project(
+                    guild_id=gid, actor_name=an, actor_id=aid, name=name, channels=chans, access_role_name=access_role, confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="setup-server",
+            description="YAML/JSON 템플릿(첨부)으로 역할·카테고리·채널 일괄 셋업 (고위험).",
+        )
+        async def setup_server(ctx, template: discord.Attachment, confirm: bool = False):
+            try:
+                raw = (await template.read()).decode("utf-8")
+            except UnicodeDecodeError:
+                await ctx.respond(
+                    "템플릿 파일을 UTF-8로 읽을 수 없어 (.yaml/.yml/.json, UTF-8 인코딩).",
+                    ephemeral=True,
+                )
+                return
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.apply_template(
+                    guild_id=gid, actor_name=an, actor_id=aid, template_text=raw, confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(name="kick", description="Kick a member (high-risk; needs confirm:true).")
+        async def kick(ctx, user_id: str, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.kick_member(
+                    guild_id=gid, actor_name=an, actor_id=aid, user_id=int(user_id), confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(name="ban", description="Ban a member (high-risk; needs confirm:true).")
+        async def ban(ctx, user_id: str, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.ban_member(
+                    guild_id=gid, actor_name=an, actor_id=aid, user_id=int(user_id), confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(name="timeout", description="Timeout a member (low-risk; immediate).")
+        async def timeout_cmd(ctx, user_id: str, duration: int = 600):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.timeout_member(
+                    guild_id=gid, actor_name=an, actor_id=aid, user_id=int(user_id), duration_seconds=duration
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(
+            name="purge", description="Delete messages in a channel (high-risk; max 100; needs confirm:true)."
+        )
+        async def purge(ctx, channel_id: str, count: int, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            await self._run_op(
+                ctx,
+                lambda t: self._service.purge_messages(
+                    guild_id=gid, actor_name=an, actor_id=aid, channel_id=int(channel_id), count=count, confirm_token=t
+                ),
+                confirm=confirm,
+            )
+
+    # --- Command helpers (ralplan S3): actor/guild extraction + confirm-then-execute render ---
+
+    @staticmethod
+    def _actor(ctx) -> tuple[str, int]:
+        a = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+        return (getattr(a, "display_name", "?"), int(getattr(a, "id", 0)))
+
+    def _ctx_guild(self, ctx) -> int:
+        return int(getattr(ctx, "guild_id", 0) or self._guild_id)
+
+    def _resolve_category(self, guild, category_id):
+        """Resolve a category id to a channel object; raise if given-but-unresolved (ralplan S6:
+        no silent root/move fallback). Returns None when category_id is falsy."""
+        if not category_id:
+            return None
+        category = guild.get_channel(int(category_id))
+        if category is None:
+            raise RuntimeError(f"category {category_id} not found")
+        return category
+
+    async def _run_op(self, ctx, factory, *, confirm: bool) -> None:
+        """Run a service op and render the result (ralplan S3/S6). High-risk ops return
+        needs_confirmation: confirm=true re-submits the issued single-use token (policy layer
+        consumes + executes); otherwise a danger-styled confirm button is shown (both paths per
+        R10). Errors are surfaced ephemerally instead of failing silently."""
+        try:
+            # Ack within Discord's 3s window; the actual work (bulk REST + rate-limit spacing)
+            # then runs against the 15-min followup window instead of the initial deadline (S6).
+            await ctx.defer(ephemeral=True)
+            res = await factory(None)
+            if res.needs_confirmation:
+                if confirm:
+                    res = await factory(res.confirmation_token)
+                else:
+                    view = _ConfirmView(factory, res.confirmation_token)
+                    await ctx.respond(
+                        f"위험 작업이야: {res.detail}\n'확인 실행' 버튼을 누르거나 confirm:true 옵션으로 다시 실행해줘.",
+                        view=view,
+                        ephemeral=True,
+                    )
+                    return
+            await ctx.respond(res.detail, ephemeral=True)
+        except Exception:
+            log.exception("admin command failed")
+            await ctx.respond(
+                "명령 처리 중 오류가 났어. 입력값(채널/역할 ID 등)을 확인하고 다시 시도해줘.",
+                ephemeral=True,
+            )
+
+    # --- GuildAdmin primitives (ralplan S2; exercised by S3+ commands via mock guild) ---
+
+    def _guild(self, guild_id: int):
+        guild = self._client.get_guild(guild_id)
+        if guild is None:
+            raise RuntimeError(f"guild {guild_id} not found (bot not in guild / not cached)")
+        return guild
+
+    async def _member(self, guild_id: int, user_id: int):
+        """Resolve a member id-only: cache first, then fetch_member REST fallback — works
+        without the privileged members intent (ralplan S4 boundary contract)."""
+        guild = self._guild(guild_id)
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.NotFound as exc:
+                raise RuntimeError(f"member {user_id} not found") from exc
+        return member
+
+    async def create_category(self, guild_id: int, name: str, *, reason: str) -> str:
+        await self._rl.acquire()
+        category = await self._guild(guild_id).create_category(name, reason=reason)
+        return str(category.id)
+
+    async def create_channel(
+        self, guild_id: int, name: str, kind: str, category_id: int | None = None, *, reason: str
+    ) -> str:
+        await self._rl.acquire()
+        guild = self._guild(guild_id)
+        category = self._resolve_category(guild, category_id)
+        if kind == "voice":
+            channel = await guild.create_voice_channel(name, category=category, reason=reason)
+        else:
+            channel = await guild.create_text_channel(name, category=category, reason=reason)
+        return str(channel.id)
+
+    async def edit_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        name: str | None = None,
+        category_id: int | None = None,
+        reason: str,
+    ) -> None:
+        guild = self._guild(guild_id)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            raise RuntimeError(f"channel {channel_id} not found")
+        fields: dict = {}
+        if name is not None:
+            fields["name"] = name
+        if category_id is not None:
+            fields["category"] = self._resolve_category(guild, category_id)
+        await channel.edit(reason=reason, **fields)
+
+    async def delete_channel(self, guild_id: int, channel_id: int, *, reason: str) -> None:
+        guild = self._guild(guild_id)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            raise RuntimeError(f"channel {channel_id} not found")
+        await channel.delete(reason=reason)
+
+    async def create_role(
+        self, guild_id: int, name: str, *, permissions: int = 0, reason: str
+    ) -> str:
+        await self._rl.acquire()
+        role = await self._guild(guild_id).create_role(
+            name=name, permissions=discord.Permissions(permissions), reason=reason
+        )
+        return str(role.id)
+
+    async def role_permissions(self, guild_id: int, role_id: int) -> int:
+        role = self._guild(guild_id).get_role(role_id)
+        if role is None:
+            raise RuntimeError(f"role {role_id} not found")
+        return role.permissions.value
+
+    async def assign_role(self, guild_id: int, user_id: int, role_id: int, *, reason: str) -> None:
+        role = self._guild(guild_id).get_role(role_id)
+        if role is None:
+            raise RuntimeError(f"role {role_id} not found")
+        member = await self._member(guild_id, user_id)
+        await member.add_roles(role, reason=reason)
+
+    async def remove_role(self, guild_id: int, user_id: int, role_id: int, *, reason: str) -> None:
+        role = self._guild(guild_id).get_role(role_id)
+        if role is None:
+            raise RuntimeError(f"role {role_id} not found")
+        member = await self._member(guild_id, user_id)
+        await member.remove_roles(role, reason=reason)
+
+    async def set_role_permissions(
+        self, guild_id: int, role_id: int, permissions: int, *, reason: str
+    ) -> None:
+        role = self._guild(guild_id).get_role(role_id)
+        if role is None:
+            raise RuntimeError(f"role {role_id} not found")
+        await role.edit(permissions=discord.Permissions(permissions), reason=reason)
+
+    async def set_channel_role_overwrite(
+        self, guild_id: int, channel_id: int, role_id: int, *, view: bool, reason: str
+    ) -> None:
+        await self._rl.acquire()
+        guild = self._guild(guild_id)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            raise RuntimeError(f"channel {channel_id} not found")
+        target = guild.get_role(role_id)
+        if target is None:
+            raise RuntimeError(f"role {role_id} not found")
+        await channel.set_permissions(
+            target, overwrite=discord.PermissionOverwrite(view_channel=view), reason=reason
+        )
+
+    async def kick_member(self, guild_id: int, user_id: int, *, reason: str) -> None:
+        member = await self._member(guild_id, user_id)
+        await member.kick(reason=reason)
+
+    async def ban_member(self, guild_id: int, user_id: int, *, reason: str) -> None:
+        member = await self._member(guild_id, user_id)
+        await member.ban(reason=reason)
+
+    async def timeout_member(
+        self, guild_id: int, user_id: int, duration_seconds: int, *, reason: str
+    ) -> None:
+        from datetime import timedelta
+        member = await self._member(guild_id, user_id)
+        await member.timeout(timedelta(seconds=duration_seconds), reason=reason)
+
+    async def purge_messages(
+        self, guild_id: int, channel_id: int, count: int, *, reason: str
+    ) -> int:
+        guild = self._guild(guild_id)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            raise RuntimeError(f"channel {channel_id} not found")
+        deleted = await channel.purge(limit=count, reason=reason)
+        return len(deleted)
+
+    async def list_roles(self, guild_id: int) -> list[dict]:
+        return [{"id": str(r.id), "name": r.name} for r in self._guild(guild_id).roles]
+
+    async def list_channels(self, guild_id: int) -> list[dict]:
+        out: list[dict] = []
+        for ch in self._guild(guild_id).channels:
+            parent = getattr(ch, "category_id", None)
+            out.append(
+                {
+                    "id": str(ch.id),
+                    "name": ch.name,
+                    "type": int(ch.type.value),
+                    "parent_id": str(parent) if parent else None,
+                }
+            )
+        return out
+
+    # --- ChatPlatform interface (channel_id forms, used by non-Discord callers) ---
+
+    async def recent_messages(self, channel_id: str, n: int) -> list[BufferedMessage]:
+        channel = self._client.get_channel(int(channel_id))
+        if channel is None:
+            return []
+        return await self._history(channel, n)
+
+    async def send(self, channel_id: str, text: str) -> None:
+        channel = self._client.get_channel(int(channel_id))
+        if channel is None:
+            log.warning("send: channel %s not found", channel_id)
+            return
+        await self._send_to(channel, text)
+
+    async def run(self) -> None:
+        await self._client.start(self._token)
+
+
+class _ConfirmView(discord.ui.View):
+    """High-risk confirmation button (ralplan S6 / R10). Holds the issued single-use token + the
+    op factory; clicking re-runs the op with the token (consumed in the policy layer)."""
+
+    def __init__(self, factory, token: str, *, authorized=None, timeout: float = 300.0) -> None:
+        super().__init__(timeout=timeout)
+        self._factory = factory
+        self._token = token
+        self._authorized = authorized  # NL 공개 메시지: 버튼 클릭자도 권한 재확인 (필수)
+
+    async def _do_confirm(self, interaction) -> None:
+        if self._authorized is not None and not self._authorized(interaction):
+            await interaction.response.send_message(
+                "⛔ 너는 이 작업을 확인할 권한이 없어 (운영진/주인만).", ephemeral=True
+            )
+            return
+        await interaction.response.defer()  # ack the button click before the (possibly bulk) op
+        try:
+            res = await self._factory(self._token)
+            msg = res.detail
+        except Exception:
+            log.exception("admin confirm failed")
+            msg = "명령 처리 중 오류가 났어. 다시 시도해줘."
+        for item in self.children:
+            item.disabled = True
+        await interaction.edit_original_response(content=msg, view=self)
+        self.stop()
+
+    @discord.ui.button(label="확인 실행", style=discord.ButtonStyle.danger)
+    async def confirm(self, button, interaction) -> None:
+        await self._do_confirm(interaction)

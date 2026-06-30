@@ -1,0 +1,27 @@
+# systemd unit for running DCM (디씨봇) 24/7.
+# Install: copy to /etc/systemd/system/dcm.service, then `sudo systemctl enable --now dcm`.
+# Adjust User / WorkingDirectory paths to match your host.
+
+[Unit]
+Description=DCM Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dcm
+WorkingDirectory=/opt/dcm
+# pydantic-settings reads ./.env from WorkingDirectory; keep it chmod 600.
+ExecStart=/opt/dcm/.venv/bin/dcm
+Restart=on-failure
+RestartSec=5
+
+# Hardening — the bot needs no inbound ports and only writes its data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dcm/data
+
+[Install]
+WantedBy=multi-user.target
