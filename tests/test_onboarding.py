@@ -334,3 +334,39 @@ class TestOnboardingRobustness:
         _run(adapter.on_member_join(member), loop)  # 예외 전파 없이 침묵 degrade
 
         assert member.added_roles == [role]  # 환영 실패에도 역할은 독립적으로 부여됨
+
+
+class TestPerGuildOnboarding:
+    """P6: settings + guild_id 가 주어지면 그 길드 설정으로 결정한다."""
+
+    def test_decide_uses_per_guild_settings(self):
+        from dcm.service.guild_settings import GuildSettings
+
+        class _FakeSettings:
+            def __init__(self, mapping):
+                self._m = mapping
+
+            def get(self, gid):
+                return self._m.get(str(gid), GuildSettings(guild_id=str(gid)))
+
+        settings = _FakeSettings(
+            {
+                "A": GuildSettings(
+                    guild_id="A", welcome_channel_id=111, default_role_id=222, welcome_message="A서버 환영 {name}"
+                ),
+                "B": GuildSettings(guild_id="B"),  # 미설정
+            }
+        )
+        policy = OnboardingPolicy(settings=settings)
+        da = policy.decide("철수", guild_id="A")
+        assert da.welcome_channel_id == 111 and da.default_role_id == 222
+        assert da.welcome_text is not None and "철수" in da.welcome_text and "A서버" in da.welcome_text
+        # B 길드는 미설정 → 환영/역할 모두 스킵
+        db = policy.decide("영희", guild_id="B")
+        assert db.welcome_channel_id is None and db.default_role_id is None and db.welcome_text is None
+
+    def test_no_settings_falls_back_to_global(self):
+        # settings 미주입(하위호환): 생성자 전역값 사용
+        policy = OnboardingPolicy(welcome_channel_id=999, default_role_id=888, welcome_message="안녕 {name}")
+        d = policy.decide("민수")
+        assert d.welcome_channel_id == 999 and d.default_role_id == 888 and "민수" in d.welcome_text

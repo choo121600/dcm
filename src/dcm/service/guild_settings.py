@@ -1,0 +1,106 @@
+"""서버(길드)별 설정 저장소 (멀티길드 v2).
+
+discord-free 순수 모듈. memory.db 와 동일 SQLite 파일을 재사용한다(단일 백업/마이그레이션).
+env 의 admin_guild_id/admin_role_id 등은 기존 시드 길드의 기본값으로만 1회 시드되고,
+그 외 길드는 미설정(=authz 폴백 트리거)으로 둔다.
+"""
+from __future__ import annotations
+
+import sqlite3
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS guild_settings (
+  guild_id           TEXT PRIMARY KEY,
+  admin_role_id      INTEGER,
+  welcome_channel_id INTEGER,
+  default_role_id    INTEGER,
+  welcome_message    TEXT,
+  updated_at         REAL
+);
+"""
+
+# _upsert 가 SQL 에 직접 끼워넣을 수 있는 컬럼 (외부 입력 아님 — 인젝션 방지 allowlist).
+_SETTABLE = frozenset(
+    {"admin_role_id", "welcome_channel_id", "default_role_id", "welcome_message"}
+)
+
+
+@dataclass(frozen=True)
+class GuildSettings:
+    guild_id: str
+    admin_role_id: int = 0  # 0 = 미설정 → authz 가 디스코드 권한 폴백 사용
+    welcome_channel_id: int | None = None
+    default_role_id: int | None = None
+    welcome_message: str | None = None
+
+
+class GuildSettingsStore:
+    def __init__(self, db_path: str, *, seed: GuildSettings | None = None) -> None:
+        path = Path(db_path)
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(str(path))
+        self._db.row_factory = sqlite3.Row
+        self._db.executescript(_SCHEMA)
+        self._db.commit()
+        if seed is not None:
+            self._seed(seed)
+
+    def _seed(self, seed: GuildSettings) -> None:
+        # 시드 길드 기본값을 1회만 (운영자가 이후 바꾼 값은 덮어쓰지 않음 — INSERT OR IGNORE).
+        self._db.execute(
+            "INSERT OR IGNORE INTO guild_settings (guild_id, admin_role_id, welcome_channel_id, "
+            "default_role_id, welcome_message, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                str(seed.guild_id),
+                int(seed.admin_role_id or 0),
+                seed.welcome_channel_id,
+                seed.default_role_id,
+                seed.welcome_message,
+                time.time(),
+            ),
+        )
+        self._db.commit()
+
+    def get(self, guild_id: int | str) -> GuildSettings:
+        row = self._db.execute(
+            "SELECT * FROM guild_settings WHERE guild_id = ?", (str(guild_id),)
+        ).fetchone()
+        if row is None:
+            return GuildSettings(guild_id=str(guild_id))
+        return GuildSettings(
+            guild_id=row["guild_id"],
+            admin_role_id=int(row["admin_role_id"] or 0),
+            welcome_channel_id=row["welcome_channel_id"],
+            default_role_id=row["default_role_id"],
+            welcome_message=row["welcome_message"],
+        )
+
+    def _upsert(self, guild_id: int | str, field: str, value) -> None:
+        if field not in _SETTABLE:  # 방어: 고정 set_* 메서드에서만 호출되지만 한 번 더 가드
+            raise ValueError(f"settable 아님: {field}")
+        self._db.execute(
+            f"INSERT INTO guild_settings (guild_id, {field}, updated_at) VALUES (?, ?, ?) "
+            f"ON CONFLICT(guild_id) DO UPDATE SET {field} = excluded.{field}, "
+            "updated_at = excluded.updated_at",
+            (str(guild_id), value, time.time()),
+        )
+        self._db.commit()
+
+    def set_admin_role(self, guild_id: int | str, role_id: int) -> None:
+        self._upsert(guild_id, "admin_role_id", int(role_id))
+
+    def set_welcome_channel(self, guild_id: int | str, channel_id: int) -> None:
+        self._upsert(guild_id, "welcome_channel_id", int(channel_id))
+
+    def set_default_role(self, guild_id: int | str, role_id: int) -> None:
+        self._upsert(guild_id, "default_role_id", int(role_id))
+
+    def set_welcome_message(self, guild_id: int | str, message: str) -> None:
+        self._upsert(guild_id, "welcome_message", str(message))
+
+    def close(self) -> None:
+        self._db.close()

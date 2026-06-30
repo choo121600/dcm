@@ -39,6 +39,30 @@ PERMISSION_BITS: dict[str, int] = {
     "timeout_members": MODERATE_MEMBERS,  # 별칭
 }
 
+# 역방향(서버 → 템플릿) 추출용: 권한 비트 → 정규 이름 (별칭 제외, 표시 순서 고정).
+_CANONICAL_PERMS: tuple[tuple[str, int], ...] = (
+    ("administrator", ADMINISTRATOR),
+    ("manage_guild", MANAGE_GUILD),
+    ("manage_roles", MANAGE_ROLES),
+    ("manage_channels", MANAGE_CHANNELS),
+    ("manage_messages", MANAGE_MESSAGES),
+    ("manage_webhooks", MANAGE_WEBHOOKS),
+    ("manage_nicknames", MANAGE_NICKNAMES),
+    ("kick_members", KICK_MEMBERS),
+    ("ban_members", BAN_MEMBERS),
+    ("moderate_members", MODERATE_MEMBERS),
+)
+# 템플릿이 표현할 수 있는 권한 비트 마스크 (그 외 비트는 추출 시 버림 — 스키마가 지원 안 함).
+SUPPORTED_PERM_MASK = (
+    ADMINISTRATOR | MANAGE_GUILD | MANAGE_ROLES | MANAGE_CHANNELS | MANAGE_MESSAGES
+    | MANAGE_WEBHOOKS | MANAGE_NICKNAMES | KICK_MEMBERS | BAN_MEMBERS | MODERATE_MEMBERS
+)
+
+
+def bits_to_names(bits: int) -> list[str]:
+    """권한 비트필드 → 템플릿 권한 이름 목록 (지원하는 관리 권한만, 고정 순서)."""
+    return [name for name, bit in _CANONICAL_PERMS if bits & bit]
+
 CHANNEL_KINDS = ("text", "voice")
 
 MAX_NAME_LEN = 100
@@ -204,3 +228,30 @@ def parse_template(raw: str) -> ServerTemplate:
         )
 
     return ServerTemplate(roles=tuple(roles), categories=tuple(cats))
+
+
+def to_yaml(template: ServerTemplate) -> str:
+    """ServerTemplate → YAML 문자열. parse_template로 다시 읽을 수 있는 형식(round-trip)."""
+    data: dict = {}
+    if template.roles:
+        roles_out = []
+        for r in template.roles:
+            entry: dict = {"name": r.name}
+            if r.permission_names:
+                entry["permissions"] = list(r.permission_names)
+            roles_out.append(entry)
+        data["roles"] = roles_out
+    if template.categories:
+        cats_out = []
+        for c in template.categories:
+            entry = {"name": c.name}
+            if c.private:
+                entry["private"] = True
+            if c.visible_to:
+                entry["visible_to"] = list(c.visible_to)
+            entry["channels"] = [{"name": ch.name, "type": ch.kind} for ch in c.channels]
+            cats_out.append(entry)
+        data["categories"] = cats_out
+    if not data:
+        data = {"categories": []}
+    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)

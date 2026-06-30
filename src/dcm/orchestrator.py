@@ -51,19 +51,19 @@ class Orchestrator:
         self._router = router
         self._web_last: dict[str, float] = {}  # per-user 웹 검색 마지막 호출 시각
 
-    def _self_block(self) -> str:
-        if not self._store:
+    def _self_block(self, store) -> str:
+        if not store:
             return ""
-        selves = self._store.self_memories(limit=5)
+        selves = store.self_memories(limit=5)
         if not selves:
             return ""
         lines = "\n".join(f"- {m.content}" for m in selves)
         return f"\n\n[who you are becoming]\n{lines}"
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, store) -> str:
         return (
             f"{self._persona}"
-            f"{self._self_block()}\n\n"
+            f"{self._self_block(store)}\n\n"
             "---\n"
             f"Your name is {self._bot_name}. You are chatting in a Discord server.\n"
             "Always reply in Korean, in the casual friendly (반말) register described above. "
@@ -91,12 +91,12 @@ class Orchestrator:
             lines.append(f"{who}: {m.content}")
         return "\n".join(lines)
 
-    async def _recall(self, text: str, author_id: str) -> list[str]:
-        if not (self._store and self._embedder):
+    async def _recall(self, text: str, author_id: str, store) -> list[str]:
+        if not (store and self._embedder):
             return []
         try:
             query = (await self._embedder.embed([text]))[0]
-            memories = self._store.retrieve(
+            memories = store.retrieve(
                 query, now=time.time(), subject_id=author_id, top_n=self._top_n
             )
             return [m.content for m in memories]
@@ -112,8 +112,14 @@ class Orchestrator:
             return None
         if len(text) > self._max_input_chars:  # input cap (DESIGN.md §14.4)
             text = text[: self._max_input_chars]
+        # 멀티길드(P5): 이 길드로 스코프된 기억 핸들. guild_id 있으면 for_guild, 없으면(테스트 등) raw.
+        gstore = (
+            self._store.for_guild(incoming.guild_id)
+            if (self._store and incoming.guild_id)
+            else self._store
+        )
 
-        command_reply = self._handle_command(text, incoming.author_id)
+        command_reply = self._handle_command(text, incoming.author_id, gstore)
         if command_reply is not None:
             return command_reply
 
@@ -125,6 +131,9 @@ class Orchestrator:
                 author_name=author_name,
                 role_ids=incoming.role_ids,
                 is_owner=incoming.is_owner,
+                guild_id=incoming.guild_id,
+                admin_role_id=incoming.admin_role_id,
+                has_manage_guild=incoming.has_manage_guild,
             )
             try:
                 router_reply = await self._router.route(auth, text)
@@ -135,7 +144,7 @@ class Orchestrator:
                 return router_reply
 
 
-        recalled = await self._recall(text, incoming.author_id)
+        recalled = await self._recall(text, incoming.author_id, gstore)
         memory_block = ""
         if recalled:
             lines = "\n".join(f"- {c}" for c in recalled)
@@ -155,7 +164,7 @@ class Orchestrator:
 
         try:
             reply, web_used = await self._llm.complete(
-                system=self._system_prompt(),
+                system=self._system_prompt(gstore),
                 messages=[{"role": "user", "content": user_content}],
                 web_search=use_web,
             )
@@ -168,16 +177,16 @@ class Orchestrator:
             asyncio.create_task(self._safe_ingest(incoming, text, reply))
         return reply
 
-    def _handle_command(self, text: str, author_id: str) -> str | None:
+    def _handle_command(self, text: str, author_id: str, store) -> str | None:
         """Self-service memory commands, acting only on the asker's own memories (§14.2)."""
-        if not self._store:
+        if not store:
             return None
         intent = commands.detect(text)
         if intent == "forget_me":
-            n = self._store.forget_subject(author_id, time.time())
+            n = store.forget_subject(author_id, time.time())
             return f"알겠어, 너에 대해 기억하던 거 {n}개 싹 지웠어. 깔끔하게 잊었음 🫡"
         if intent == "show_memories":
-            mems = self._store.list_for_subject(author_id, limit=10)
+            mems = store.list_for_subject(author_id, limit=10)
             if not mems:
                 return "음 너에 대해 딱히 기억하는 건 아직 없어 ㅋㅋ"
             lines = "\n".join(f"- {m.content}" for m in mems)
@@ -195,6 +204,7 @@ class Orchestrator:
                 user_text=user_text,
                 bot_reply=reply,
                 now=time.time(),
+                guild_id=incoming.guild_id,
             )
         except Exception:
             log.exception("background ingest failed")

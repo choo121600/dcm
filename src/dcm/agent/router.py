@@ -111,13 +111,9 @@ class NLRouter:
         self,
         llm: LLMClient,
         service: GuildAdminService,
-        admin_role_id: int,
-        guild_id: int,
     ) -> None:
         self._llm = llm
         self._service = service
-        self._admin_role_id = admin_role_id
-        self._guild_id = guild_id
 
     async def route(self, auth: AuthContext, user_text: str) -> str | None:
         """NL 텍스트를 파싱해 관리 명령 실행 결과를 반환하거나, 폴백 시 None 반환.
@@ -136,8 +132,12 @@ class NLRouter:
         if verb == "none" or verb not in VERBS:
             return None
 
+        # 멀티길드: 관리 명령은 컨텍스트 길드로만 동작 — 길드 없으면(이론상 DM) 거부(fail-closed).
+        if not auth.guild_id:
+            return "⛔ 서버 안에서만 관리 명령을 쓸 수 있어."
+
         # ── 단일 특권 dispatch chokepoint ──────────────────────────────────
-        if not is_admin(auth.role_ids, self._admin_role_id, auth.is_owner):
+        if not is_admin(auth.role_ids, auth.admin_role_id, auth.is_owner, auth.has_manage_guild):
             return "⛔ 이 명령은 관리자만 사용할 수 있어."
 
         params: dict = extracted.get("params") or {}
@@ -166,7 +166,7 @@ class NLRouter:
     async def _dispatch(self, verb: str, auth: AuthContext, params: dict) -> str:
         """verb를 GuildAdminService 메서드로 매핑해 호출하고 결과를 한국어로 반환."""
         common = dict(
-            guild_id=self._guild_id,
+            guild_id=auth.guild_id,
             actor_name=auth.author_name,
             actor_id=auth.author_id,
         )

@@ -32,6 +32,10 @@ _SETUP_INTENT_WORDS = (
     "구성", "세트업", "블루프린트", "blueprint", "만들어",
 )
 
+# 서버 구조 → YAML export (NL 경로) 의도 판정: 형식어 + 액션어를 동시에 만족할 때만.
+_EXPORT_FORMAT_WORDS = ("yaml", "json", "템플릿", "블루프린트", "blueprint")
+_EXPORT_ACTION_WORDS = ("뽑", "추출", "내보내", "백업", "스냅샷", "snapshot", "export", "dump", "확인", "보여", "구조")
+
 
 def split_for_discord(text: str, limit: int = DISCORD_MAX) -> list[str]:
     """Split text into chunks that fit Discord's per-message limit, preferring line breaks."""
@@ -63,6 +67,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         guild_id: int = 0,
         admin_role_id: int = 0,
         onboarding_policy=None,
+        guild_settings=None,
     ) -> None:
         self._token = token
         self._bot_name = bot_name
@@ -77,6 +82,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._admin_commands: list[str] = []  # registry for the by-construction InvokerCheck test
         self._rl = policy.RateLimiter()  # additive burst-smoothing over pycord 429 handling (S6)
         self._onboarding = onboarding_policy  # OnboardingPolicy 인스턴스 (S6 온보딩)
+        self._settings = guild_settings  # per-guild 설정/관리역할 (멀티길드 v2); None이면 env 시드값 폴백
 
         intents = discord.Intents.default()
         # Privileged — must also be enabled in the Developer Portal (DESIGN.md §14.2).
@@ -108,6 +114,9 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         # Ignore self and other bots.
         if message.author.bot or message.author == self._client.user:
             return
+        # DM(길드 없음) 전면 무시 — 멀티길드 격리상 guild_id 없는 경로는 fail-closed (P2 / G5).
+        if message.guild is None:
+            return
         # 호출 감지: @멘션 / 봇 메시지 reply / 메시지 이름 호명("지우야 …", "안녕 지우야").
         # 이름 호명은 스팸을 억제하면서 자연스러운 호명을 허용 (DESIGN.md §14.4; persona.md 예시).
         if not self._is_addressed(message):
@@ -127,6 +136,11 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             await self._handle_template_attachment(message, attachment)
             return
 
+        # 첨부 없이 "서버 구조 yaml로 뽑아줘" → 운영진/주인 한정 현재 구조 export.
+        if attachment is None and self._wants_export(self._strip_mentions(message)):
+            await self._handle_export(message)
+            return
+
         if self._handler is None:
             return
 
@@ -137,6 +151,9 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             content=self._strip_mentions(message),
             role_ids=self._role_ids(message.author),
             is_owner=self._is_owner(message),
+            guild_id=int(message.guild.id),
+            admin_role_id=self._guild_admin_role(message.guild.id),
+            has_manage_guild=self._has_manage_guild(message.author),
         )
         buffer = await self._history(message.channel, self._buffer_size)
 
@@ -164,7 +181,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             return  # 봇 입장에는 온보딩하지 않음 (S6)
 
         try:
-            decision = self._onboarding.decide(member.display_name)
+            gid = getattr(getattr(member, "guild", None), "id", None)
+            decision = self._onboarding.decide(member.display_name, guild_id=gid)
         except Exception:
             log.exception("on_member_join: 온보딩 결정 실패 (침묵 degrade)")
             return
@@ -280,7 +298,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         공개 메시지의 확인 버튼은 클릭자 권한을 다시 검사한다.
         """
         author = message.author
-        if not is_admin(self._role_ids(author), self._admin_role_id, self._is_owner(message)):
+        if not self._is_admin(message):
             await self._send_to(
                 message.channel, "⛔ 서버 템플릿 적용은 운영진(관리자 역할)이나 서버 주인만 할 수 있어."
             )
@@ -318,13 +336,118 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             return
 
         def authorized(interaction) -> bool:
-            member = getattr(interaction, "user", None) or getattr(interaction, "author", None)
-            return is_admin(self._role_ids(member), self._admin_role_id, self._is_owner(interaction))
+            return self._is_admin(interaction)
 
         view = _ConfirmView(factory, res.confirmation_token, authorized=authorized)
         await message.channel.send(
             f"{res.detail}\n\n적용하려면 아래 '확인 실행' 버튼을 눌러줘 (운영진/주인만 가능).",
             view=view,
+        )
+
+    @staticmethod
+    def _wants_export(text: str) -> bool:
+        """'서버 구조를 yaml로' 같은 export 의도면 True (형식어 + 액션어 동시 충족)."""
+        low = (text or "").lower()
+        return any(w in low for w in _EXPORT_FORMAT_WORDS) and any(
+            w in low for w in _EXPORT_ACTION_WORDS
+        )
+
+    @staticmethod
+    def _overwrite_info(channel, default_role, role_set):
+        """채널 권한 오버라이트에서 (private, 열람 허용 역할이름들) 추출."""
+        private = False
+        visible: list[str] = []
+        for target, ow in (getattr(channel, "overwrites", None) or {}).items():
+            view = getattr(ow, "view_channel", None)
+            if target == default_role:
+                if view is False:
+                    private = True
+            elif target in role_set and view is True:
+                visible.append(getattr(target, "name", ""))
+        return private, visible
+
+    def _snapshot_template(self, guild):
+        """현재 길드 구조를 ServerTemplate로 추출 (역할/카테고리/채널 + 비공개 감지)."""
+        from ..service.template import (
+            SUPPORTED_PERM_MASK,
+            ServerTemplate,
+            TemplateCategory,
+            TemplateChannel,
+            TemplateRole,
+            bits_to_names,
+        )
+
+        default_role = getattr(guild, "default_role", None)
+        role_objs = list(getattr(guild, "roles", []))
+        role_set = role_objs  # 리스트 멤버십(==)으로 검사 — discord.Role/테스트 더블 모두 안전(해시 불필요)
+        roles = []
+        for r in reversed(role_objs):  # 높은 역할 먼저
+            if r == default_role or getattr(r, "managed", False):
+                continue
+            bits = int(getattr(getattr(r, "permissions", None), "value", 0))
+            roles.append(
+                TemplateRole(
+                    name=r.name,
+                    permission_bits=bits & SUPPORTED_PERM_MASK,
+                    permission_names=tuple(bits_to_names(bits)),
+                )
+            )
+        cats = []
+        for cat in getattr(guild, "categories", []):
+            private, visible = self._overwrite_info(cat, default_role, role_set)
+            chans = []
+            for ch in getattr(cat, "channels", []):
+                t = getattr(ch, "type", None)
+                if t == discord.ChannelType.voice:
+                    chans.append(TemplateChannel(name=ch.name, kind="voice"))
+                elif t == discord.ChannelType.text:
+                    chans.append(TemplateChannel(name=ch.name, kind="text"))
+            cats.append(
+                TemplateCategory(
+                    name=cat.name, channels=tuple(chans), private=private, visible_to=tuple(visible)
+                )
+            )
+        return ServerTemplate(roles=tuple(roles), categories=tuple(cats))
+
+    def _export_server_yaml(self, guild) -> str:
+        """길드 → YAML 텍스트 (헤더 주석 포함). 무카테고리 최상위 채널은 주석으로 안내."""
+        from ..service.template import to_yaml
+
+        body = to_yaml(self._snapshot_template(guild))
+        orphans = [
+            c.name
+            for c in getattr(guild, "channels", [])
+            if getattr(c, "category", None) is None
+            and getattr(c, "type", None) in (discord.ChannelType.text, discord.ChannelType.voice)
+        ]
+        header = "# dcm가 추출한 현재 서버 구조. 수정 후 /setup-server 로 다시 적용할 수 있어요.\n"
+        if orphans:
+            header += "# 참고: 카테고리에 없는 최상위 채널은 템플릿에서 제외됨 — " + ", ".join(orphans) + "\n"
+        return header + body
+
+    async def _handle_export(self, message) -> None:
+        """'지우야 서버 구조 yaml로 뽑아줘' NL 경로: 운영진/주인만 현재 구조를 YAML 파일로 회신."""
+        if not self._is_admin(message):
+            await self._send_to(
+                message.channel, "⛔ 서버 구조 내보내기는 운영진(관리자 역할)이나 서버 주인만 할 수 있어."
+            )
+            return
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            await self._send_to(message.channel, "서버 안에서만 쓸 수 있어.")
+            return
+        try:
+            text = self._export_server_yaml(guild)
+        except Exception:
+            log.exception("export failed")
+            await self._send_to(message.channel, "서버 구조를 내보내는 중 오류가 났어.")
+            return
+        import io
+
+        fp = io.BytesIO(text.encode("utf-8"))
+        await message.channel.send(
+            "현재 서버 구조 템플릿이야. 수정해서 다시 세팅에 쓸 수 있어.",
+            file=discord.File(fp, filename="server-template.yaml"),
         )
 
     # --- InvokerCheck + by-construction admin-command registration (ralplan S2) ---
@@ -333,6 +456,24 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
     def _role_ids(member) -> frozenset[int]:
         """Resolve a Discord member's role ids to plain data (ralplan S2)."""
         return frozenset(int(r.id) for r in getattr(member, "roles", None) or [])
+
+    @staticmethod
+    def _has_manage_guild(member) -> bool:
+        """호출자가 디스코드 Manage Guild 또는 Administrator 권한 보유 여부 (어댑터 한정 해석)."""
+        perms = getattr(member, "guild_permissions", None)
+        if perms is None:
+            return False
+        return bool(getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False))
+
+    def _guild_admin_role(self, guild_id) -> int:
+        """이 길드의 설정 관리역할 id (없으면 0 → authz 가 has_manage_guild 폴백). 멀티길드 v2.
+        settings 미주입(단일길드 호환)이면 env 시드 admin_role_id 사용."""
+        if self._settings is None:
+            return int(self._admin_role_id or 0)
+        try:
+            return int(self._settings.get(int(guild_id)).admin_role_id or 0)
+        except Exception:
+            return 0
 
     @staticmethod
     def _is_owner(obj) -> bool:
@@ -355,13 +496,19 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         Authz is bound to Discord role membership in code, never inferred from message text;
         @default_permissions is only a UI hint and is intentionally NOT relied on."""
         member = getattr(ctx, "author", None) or getattr(ctx, "user", None)
-        return is_admin(self._role_ids(member), self._admin_role_id, self._is_owner(ctx))
+        gid = self._ctx_guild(ctx)
+        return is_admin(
+            self._role_ids(member),
+            self._guild_admin_role(gid),
+            self._is_owner(ctx),
+            self._has_manage_guild(member),
+        )
 
     def admin_command(self, name: str, description: str, **kwargs):
-        """Register a guild-admin slash command with the Manage Guild InvokerCheck injected
-        by construction (ralplan S2). This is the SOLE registration path for admin commands,
-        so an unguarded admin command cannot be registered. The wrapped callback runs only
-        after the InvokerCheck passes; non-admins get an ephemeral denial."""
+        """Register a global admin slash command with the InvokerCheck injected by construction
+        (ralplan S2 / 멀티길드 v2 P4). Registered globally (no guild_ids) so the command appears
+        in every server the bot inhabits. The wrapped callback runs only after the InvokerCheck
+        passes; non-admins get an ephemeral denial."""
         import functools
         import inspect
 
@@ -376,7 +523,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             wrapped.__signature__ = inspect.signature(func)  # preserve options for pycord
             wrapped.__gjc_admin_guarded__ = True  # asserted by the by-construction test
             self._client.slash_command(
-                name=name, description=description, guild_ids=[self._guild_id], **kwargs
+                name=name, description=description, **kwargs
             )(wrapped)
             self._admin_commands.append(name)
             return wrapped
@@ -544,6 +691,27 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                 confirm=confirm,
             )
 
+        @self.admin_command(
+            name="export-server",
+            description="현재 서버 구조(역할·카테고리·채널)를 YAML 템플릿으로 내보내기.",
+        )
+        async def export_server(ctx):
+            await ctx.defer(ephemeral=True)
+            try:
+                text = self._export_server_yaml(self._guild(self._ctx_guild(ctx)))
+            except Exception:
+                log.exception("export-server failed")
+                await ctx.respond("서버 구조를 내보내는 중 오류가 났어.", ephemeral=True)
+                return
+            import io
+
+            fp = io.BytesIO(text.encode("utf-8"))
+            await ctx.respond(
+                "현재 서버 구조 템플릿이야. 수정해서 `/setup-server`로 다시 쓸 수 있어.",
+                file=discord.File(fp, filename="server-template.yaml"),
+                ephemeral=True,
+            )
+
         @self.admin_command(name="kick", description="Kick a member (high-risk; needs confirm:true).")
         async def kick(ctx, user_id: str, confirm: bool = False):
             gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
@@ -590,6 +758,69 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                 confirm=confirm,
             )
 
+        @self.admin_command(name="set-admin-role", description="이 서버의 관리자 역할을 설정한다.")
+        async def set_admin_role(ctx, role_id: str):
+            if self._settings is None:
+                await ctx.respond("서버 설정 저장소가 없어.", ephemeral=True)
+                return
+            try:
+                rid = int(role_id)
+            except ValueError:
+                await ctx.respond("role_id 가 올바른 정수가 아니야.", ephemeral=True)
+                return
+            gid = self._ctx_guild(ctx)
+            self._settings.set_admin_role(gid, rid)
+            await ctx.respond(f"이 서버 관리 역할을 {rid}로 설정했어.", ephemeral=True)
+
+        @self.admin_command(name="set-welcome", description="환영 채널과 메시지를 설정한다.")
+        async def set_welcome(ctx, channel_id: str, message: str = ""):
+            if self._settings is None:
+                await ctx.respond("서버 설정 저장소가 없어.", ephemeral=True)
+                return
+            try:
+                cid = int(channel_id)
+            except ValueError:
+                await ctx.respond("channel_id 가 올바른 정수가 아니야.", ephemeral=True)
+                return
+            gid = self._ctx_guild(ctx)
+            self._settings.set_welcome_channel(gid, cid)
+            if message:
+                self._settings.set_welcome_message(gid, message)
+            summary = f"환영 채널을 {cid}로 설정했어."
+            if message:
+                summary += " 환영 메시지도 업데이트했어."
+            await ctx.respond(summary, ephemeral=True)
+
+        @self.admin_command(name="set-default-role", description="신규 멤버에게 자동 부여할 역할을 설정한다.")
+        async def set_default_role(ctx, role_id: str):
+            if self._settings is None:
+                await ctx.respond("서버 설정 저장소가 없어.", ephemeral=True)
+                return
+            try:
+                rid = int(role_id)
+            except ValueError:
+                await ctx.respond("role_id 가 올바른 정수가 아니야.", ephemeral=True)
+                return
+            gid = self._ctx_guild(ctx)
+            self._settings.set_default_role(gid, rid)
+            await ctx.respond(f"신규 멤버 기본 역할을 {rid}로 설정했어.", ephemeral=True)
+
+        @self.admin_command(name="show-config", description="이 서버의 현재 설정을 표시한다.")
+        async def show_config(ctx):
+            if self._settings is None:
+                await ctx.respond("서버 설정 저장소가 없어.", ephemeral=True)
+                return
+            gid = self._ctx_guild(ctx)
+            s = self._settings.get(gid)
+            lines = [
+                f"관리자 역할: {s.admin_role_id or '미설정'}",
+                f"환영 채널: {s.welcome_channel_id or '미설정'}",
+                f"기본 역할: {s.default_role_id or '미설정'}",
+                f"환영 메시지: {s.welcome_message or '미설정'}",
+            ]
+            await ctx.respond("\n".join(lines), ephemeral=True)
+
+
     # --- Command helpers (ralplan S3): actor/guild extraction + confirm-then-execute render ---
 
     @staticmethod
@@ -598,7 +829,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         return (getattr(a, "display_name", "?"), int(getattr(a, "id", 0)))
 
     def _ctx_guild(self, ctx) -> int:
-        return int(getattr(ctx, "guild_id", 0) or self._guild_id)
+        gid = getattr(ctx, "guild_id", 0) or getattr(getattr(ctx, "guild", None), "id", 0)
+        return int(gid or self._guild_id)
 
     def _resolve_category(self, guild, category_id):
         """Resolve a category id to a channel object; raise if given-but-unresolved (ralplan S6:

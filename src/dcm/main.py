@@ -16,6 +16,7 @@ from .service.guild_admin import GuildAdminService
 from .agent.router import NLRouter
 from .scheduler import BackgroundJobs
 from .service.onboarding import OnboardingPolicy
+from .service.guild_settings import GuildSettings, GuildSettingsStore
 
 log = logging.getLogger("dcm")
 
@@ -46,6 +47,7 @@ async def _run() -> None:
         weights=(settings.w_rel, settings.w_rec, settings.w_imp),
         half_life_base_days=settings.half_life_base_days,
         subject_boost=settings.subject_boost,
+        seed_guild_id=str(settings.admin_guild_id),
     )
     log.info("memory store ready (%d memories)", store.count())
     ingest = IngestionPipeline(
@@ -56,11 +58,25 @@ async def _run() -> None:
         dedup_threshold=settings.dedup_threshold,
     )
 
+    # 서버별 설정 저장소 (멀티길드 v2) — memory.db 동일 파일, 기존 길드 기본값만 시드.
+    guild_settings = GuildSettingsStore(
+        settings.memory_db,
+        seed=GuildSettings(
+            guild_id=str(settings.admin_guild_id),
+            admin_role_id=settings.admin_role_id,
+            welcome_channel_id=settings.welcome_channel_id,
+            default_role_id=settings.default_role_id,
+            welcome_message=settings.welcome_message,
+        ),
+    )
+
     onboarding = OnboardingPolicy(
+        settings=guild_settings,
         welcome_channel_id=settings.welcome_channel_id,
         welcome_message=settings.welcome_message,
         default_role_id=settings.default_role_id,
     )
+
     adapter = PycordAdapter(
         token=settings.discord_token,
         bot_name=settings.bot_name,
@@ -69,6 +85,7 @@ async def _run() -> None:
         guild_id=settings.admin_guild_id,
         admin_role_id=settings.admin_role_id,
         onboarding_policy=onboarding,
+        guild_settings=guild_settings,
     )
 
     # Guild-management slash commands (ralplan S2).
@@ -79,8 +96,6 @@ async def _run() -> None:
     nl_router = NLRouter(
         llm=llm,
         service=admin_service,
-        admin_role_id=settings.admin_role_id,
-        guild_id=settings.admin_guild_id,
     )
 
     orchestrator = Orchestrator(

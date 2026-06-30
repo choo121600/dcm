@@ -24,9 +24,9 @@ from dcm.service.guild_admin import (
 # ────────────────────────────────── 상수 ──────────────────────────────────
 ADMIN_ROLE = 999
 GUILD_ID = 12345
-NON_ADMIN_AUTH = AuthContext(author_id="user1", author_name="일반유저", role_ids=frozenset())
+NON_ADMIN_AUTH = AuthContext(author_id="user1", author_name="일반유저", role_ids=frozenset(), guild_id=GUILD_ID, admin_role_id=ADMIN_ROLE)
 ADMIN_AUTH = AuthContext(
-    author_id="admin1", author_name="관리자", role_ids=frozenset({ADMIN_ROLE})
+    author_id="admin1", author_name="관리자", role_ids=frozenset({ADMIN_ROLE}), guild_id=GUILD_ID, admin_role_id=ADMIN_ROLE
 )
 
 
@@ -413,7 +413,7 @@ class FakeLLM:
 
 
 def make_router(llm: FakeLLM, svc) -> NLRouter:
-    return NLRouter(llm=llm, service=svc, admin_role_id=ADMIN_ROLE, guild_id=GUILD_ID)
+    return NLRouter(llm=llm, service=svc)
 
 
 class TestModerationVerbsInVerbList:

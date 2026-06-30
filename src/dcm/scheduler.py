@@ -72,24 +72,28 @@ class BackgroundJobs:
                 log.exception("%s job crashed; continuing", name)
 
     async def _prune(self) -> None:
-        await run_pruning(
-            self._store,
-            now=time.time(),
-            threshold=self._retention_threshold,
-            max_delete_ratio=self._max_delete_ratio,
-            half_life_base_days=self._half_life_base_days,
-            mode=self._forget_mode,
-            llm=self._llm,
-            embedder=self._embedder,
-            blur_model=self._ingest_model,
-        )
+        # 멀티길드(P5): 길드별 핸들로만 가지치기 — 교차길드 미접근.
+        for gid in self._store.guild_ids():
+            await run_pruning(
+                self._store.for_guild(gid),
+                now=time.time(),
+                threshold=self._retention_threshold,
+                max_delete_ratio=self._max_delete_ratio,
+                half_life_base_days=self._half_life_base_days,
+                mode=self._forget_mode,
+                llm=self._llm,
+                embedder=self._embedder,
+                blur_model=self._ingest_model,
+            )
 
     async def _reflect(self) -> None:
-        await run_reflection(
-            self._llm,
-            self._store,
-            self._embedder,
-            now=time.time(),
-            min_episodics=self._reflect_min_episodics,
-            model=self._ingest_model,
-        )
+        # 멀티길드(P5): 길드별 핸들로만 reflection — 통합 semantic 의 source_ids 가 단일 길드로 한정.
+        for gid in self._store.guild_ids():
+            await run_reflection(
+                self._llm,
+                self._store.for_guild(gid),
+                self._embedder,
+                now=time.time(),
+                min_episodics=self._reflect_min_episodics,
+                model=self._ingest_model,
+            )

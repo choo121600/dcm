@@ -195,7 +195,7 @@ def test_complete_web_search_true_with_server_tool_use_block_gives_web_used_true
 def test_system_prompt_advertises_management_capability(tmp_path):
     """시스템 프롬프트가 서버 관리 능력을 인지시켜 페르소나의 거짓 거절을 막는다 (회귀 가드)."""
     orch = _orchestrator(object(), tmp_path=tmp_path)
-    sp = orch._system_prompt()
+    sp = orch._system_prompt(None)
     assert "카테고리" in sp and "역할" in sp and "모더레이션" in sp
     assert "할 수 있어" in sp  # 능력 긍정
     assert "지어내" in sp  # 실행 안 했는데 성공 지어내기 금지 가드

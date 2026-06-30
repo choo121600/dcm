@@ -18,6 +18,11 @@ class IncomingMessage:
     role_ids: frozenset[int] = frozenset()
     # 길드 주인은 항상 관리 권한 보유(디스코드 owner는 본래 모든 권한). 어댑터에서 판정해 채움.
     is_owner: bool = False
+    # 메시지가 발생한 길드 id (멀티길드 격리의 단일 소스). DM이면 어댑터가 메시지를 무시하므로 항상 채워짐.
+    guild_id: int | None = None
+    # per-guild authz (멀티길드): 이 길드의 설정 관리역할(0=미설정→권한 폴백) + 호출자 Manage Guild/Admin 권한.
+    admin_role_id: int = 0
+    has_manage_guild: bool = False
 
 
 @dataclass
@@ -45,6 +50,9 @@ class AuthContext:
     author_name: str
     role_ids: frozenset[int] = frozenset()
     is_owner: bool = False  # 길드 주인 여부 — True면 역할과 무관하게 관리자 (디스코드 owner = 모든 권한)
+    guild_id: int | None = None  # 명령이 향하는 길드 (멀티길드: 고정 guild_id 대신 컨텍스트에서)
+    admin_role_id: int = 0  # 이 길드의 설정 관리역할 (0=미설정 → has_manage_guild 폴백)
+    has_manage_guild: bool = False  # 호출자가 디스코드 Manage Guild/Administrator 보유 (어댑터 판정)
 
 
 @dataclass(frozen=True)
@@ -59,13 +67,22 @@ class TargetRef:
     label: str
 
 
-def is_admin(role_ids: frozenset[int], admin_role_id: int, is_owner: bool = False) -> bool:
-    """InvokerCheck predicate (ralplan S2): authorized iff the caller is the guild owner
-    (Discord owners inherently hold every permission) OR holds the configured admin role.
-    admin_role_id <= 0 (unset) still denies non-owners by construction."""
+def is_admin(
+    role_ids: frozenset[int],
+    admin_role_id: int,
+    is_owner: bool = False,
+    has_manage_guild: bool = False,
+) -> bool:
+    """InvokerCheck predicate (ralplan S2 / 멀티길드 G1): 길드 주인은 항상 통과(디스코드 owner는
+    본래 모든 권한). 그 외에는 — 해당 길드에 관리역할이 설정돼 있으면(admin_role_id>0) 그 역할
+    보유 여부로만 판정하고, 관리역할이 미설정(admin_role_id<=0)인 길드에서만 디스코드 Manage
+    Guild/Administrator 권한을 폴백으로 인정한다. 폴백을 미설정 길드로 한정해 기존(시드) 길드의
+    역할 기반 보안 모델을 그대로 보존한다."""
     if is_owner:
         return True
-    return admin_role_id > 0 and admin_role_id in role_ids
+    if admin_role_id > 0:
+        return admin_role_id in role_ids
+    return bool(has_manage_guild)
 
 
 # Returns the reply text to send, or None to stay silent.

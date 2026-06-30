@@ -16,8 +16,8 @@ from dcm.platform.base import AuthContext
 # ────────────────────────────────── 상수 ──────────────────────────────────
 ADMIN_ROLE = 999
 GUILD_ID = 12345
-NON_ADMIN_AUTH = AuthContext(author_id="user1", author_name="일반유저", role_ids=frozenset())
-ADMIN_AUTH = AuthContext(author_id="admin1", author_name="관리자", role_ids=frozenset({ADMIN_ROLE}))
+NON_ADMIN_AUTH = AuthContext(author_id="user1", author_name="일반유저", role_ids=frozenset(), guild_id=GUILD_ID, admin_role_id=ADMIN_ROLE)
+ADMIN_AUTH = AuthContext(author_id="admin1", author_name="관리자", role_ids=frozenset({ADMIN_ROLE}), guild_id=GUILD_ID, admin_role_id=ADMIN_ROLE)
 
 # 모든 특권 verb (none 제외)
 PRIVILEGED_VERBS = [v for v in VERBS if v != "none"]
@@ -117,7 +117,7 @@ class FakeService:
 
 
 def make_router(llm: FakeLLM, svc: FakeService) -> NLRouter:
-    return NLRouter(llm=llm, service=svc, admin_role_id=ADMIN_ROLE, guild_id=GUILD_ID)
+    return NLRouter(llm=llm, service=svc)
 
 
 def run(coro):
@@ -324,7 +324,7 @@ class TestRealServiceSignatureMatch:
         fake_admin = FakeGuildAdmin()
         service = GuildAdminService(fake_admin, PendingConfirmations())
         llm = FakeLLM({"verb": "create_category", "params": {"name": "팀A"}})
-        router = NLRouter(llm=llm, service=service, admin_role_id=ADMIN_ROLE, guild_id=GUILD_ID)
+        router = NLRouter(llm=llm, service=service)
 
         result = run(router.route(ADMIN_AUTH, "팀A 카테고리 만들어줘"))
 
@@ -338,7 +338,7 @@ class TestGuildOwnerBypass:
     """서버 주인(is_owner=True)은 관리 역할이 없어도 chokepoint를 통과한다."""
 
     OWNER_AUTH = AuthContext(
-        author_id="owner1", author_name="서버주인", role_ids=frozenset(), is_owner=True
+        author_id="owner1", author_name="서버주인", role_ids=frozenset(), is_owner=True, guild_id=GUILD_ID
     )
 
     def test_owner_without_admin_role_dispatches(self):
@@ -361,3 +361,13 @@ class TestPlaceholderNameRejected:
         result = run(make_router(llm, svc).route(ADMIN_AUTH, "카테고리 만들어"))
         assert svc.calls == [], f"placeholder {bad!r} 이 채널을 생성함"
         assert result is not None and "부족" in result
+
+
+def test_missing_guild_id_rejected():
+    """guild_id 없는 컨텍스트(이론상 DM)는 verb가 잡혀도 거부 + 서비스 미호출 (fail-closed)."""
+    llm = FakeLLM({"verb": "create_category", "params": {"name": "x"}})
+    svc = FakeService()
+    no_guild = AuthContext(author_id="u", author_name="n", role_ids=frozenset({ADMIN_ROLE}))
+    result = run(make_router(llm, svc).route(no_guild, "카테고리 만들어"))
+    assert result is not None and ("서버 안에서만" in result or "⛔" in result)
+    assert svc.calls == []

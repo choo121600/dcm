@@ -124,3 +124,29 @@ def test_summary_lists_contents():
     assert "운영진" in s and "2026-summer" in s and "회의" in s
     assert "🔒" in s  # private 카테고리 표시
     assert "합계" in s
+
+
+def test_bits_to_names():
+    from dcm.service.template import bits_to_names
+
+    assert bits_to_names(ga.MANAGE_CHANNELS | ga.KICK_MEMBERS) == ["manage_channels", "kick_members"]
+    assert bits_to_names(0) == []
+    assert bits_to_names(ga.ADMINISTRATOR) == ["administrator"]
+    assert bits_to_names(1 << 11) == []  # SEND_MESSAGES 등 비관리 권한은 추출에서 무시
+
+
+def _cat_shape(t):
+    return [
+        (c.name, c.private, c.visible_to, tuple((ch.name, ch.kind) for ch in c.channels))
+        for c in t.categories
+    ]
+
+
+def test_to_yaml_roundtrips():
+    from dcm.service.template import to_yaml
+
+    t1 = parse_template(_YAML)
+    t2 = parse_template(to_yaml(t1))  # YAML로 내보냈다가 다시 읽어도 동일
+    assert [r.name for r in t2.roles] == [r.name for r in t1.roles]
+    assert [r.permission_names for r in t2.roles] == [r.permission_names for r in t1.roles]
+    assert _cat_shape(t2) == _cat_shape(t1)

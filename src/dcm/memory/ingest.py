@@ -64,7 +64,9 @@ class IngestionPipeline:
         user_text: str,
         bot_reply: str,
         now: float,
+        guild_id: str | None = None,
     ) -> None:
+        store = self._store.for_guild(guild_id) if guild_id else self._store
         exchange = f"{author_name}: {user_text}\n{bot_reply}"
         try:
             raw, _ = await self._llm.complete(
@@ -89,16 +91,16 @@ class IngestionPipeline:
                 continue
             importance = float(max(1, min(10, int(item.get("importance", 3)))))
 
-            similar = self._store.most_similar(embedding, subject_id=author_id)
+            similar = store.most_similar(embedding, subject_id=author_id)
             if similar and similar[0] >= self._dedup_threshold:
                 # Reinforce the existing memory instead of duplicating (§5.3).
-                self._store.touch_importance(
+                store.touch_importance(
                     similar[1].id, max(similar[1].importance, importance), now
                 )
                 log.info("ingest: reinforced existing memory #%s", similar[1].id)
                 continue
 
-            memory_id = self._store.add(
+            memory_id = store.add(
                 kind="episodic",
                 content=content,
                 importance=importance,

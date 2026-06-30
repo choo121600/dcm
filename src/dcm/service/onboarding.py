@@ -29,30 +29,39 @@ class OnboardingPolicy:
     def __init__(
         self,
         *,
+        settings=None,
         welcome_channel_id: int | None = None,
         welcome_message: str = "환영합니다! 편하게 인사하고 대화해요 :)",
         default_role_id: int | None = None,
     ) -> None:
+        self._settings = settings  # GuildSettingsStore (멀티길드); None이면 전역값 사용(하위호환)
         self._welcome_channel_id = welcome_channel_id
         self._welcome_message = welcome_message
         self._default_role_id = default_role_id
 
-    def decide(self, member_display_name: str) -> OnboardingDecision:
-        """입장 시 취할 동작을 결정한다.
+    def decide(
+        self, member_display_name: str, guild_id: int | str | None = None
+    ) -> OnboardingDecision:
+        """입장 시 취할 동작을 결정한다. 멀티길드: settings + guild_id 가 있으면 그 길드 설정을,
+        없으면 생성자 주입 전역값(하위호환)을 사용한다.
 
-        welcome_channel_id가 설정돼 있으면 welcome_text를 생성하고 채널 ID를 포함한다.
-        설정되지 않으면 메시지 전송을 스킵한다(welcome_text=None, welcome_channel_id=None).
-        default_role_id가 설정돼 있으면 해당 역할 ID를 포함한다. 없으면 None.
+        welcome 채널이 설정돼 있으면 welcome_text 생성(없으면 스킵). default_role 설정 시 역할 포함.
         """
-        if self._welcome_channel_id is not None:
-            # {name} 플레이스홀더만 안전하게 치환한다. 다른 중괄호 패턴은 그대로 둔다.
+        channel_id = self._welcome_channel_id
+        message = self._welcome_message
+        role_id = self._default_role_id
+        if self._settings is not None and guild_id is not None:
+            s = self._settings.get(guild_id)
+            channel_id = s.welcome_channel_id
+            message = s.welcome_message or self._welcome_message
+            role_id = s.default_role_id
+
+        if channel_id is not None:
+            # {name} 플레이스홀더만 안전 치환. 포맷 오류는 원본 템플릿으로 안전 fallback.
             try:
-                text: str | None = self._welcome_message.format(name=member_display_name)
+                text: str | None = message.format(name=member_display_name)
             except Exception:
-                # 어떤 포맷 오류(미지 플레이스홀더·불균형 중괄호·속성/인덱스 접근 등)도
-                # 입장 처리를 죽이지 않도록 원본 템플릿으로 안전 fallback한다.
-                text = self._welcome_message
-            channel_id: int | None = self._welcome_channel_id
+                text = message
         else:
             text = None
             channel_id = None
@@ -60,5 +69,5 @@ class OnboardingPolicy:
         return OnboardingDecision(
             welcome_text=text,
             welcome_channel_id=channel_id,
-            default_role_id=self._default_role_id,
+            default_role_id=role_id,
         )

@@ -197,3 +197,49 @@ def test_non_owner_without_admin_role_still_rejected(loop):
     ctx.guild = types.SimpleNamespace(owner_id=99999)  # someone else owns the guild
     loop.run_until_complete(whoami.callback(ctx))
     assert "관리자" in ctx.responses[-1][0]
+
+
+# --- per-guild authz (멀티길드 P3): Manage Guild 폴백은 관리역할 미설정 길드 한정 ---
+
+def test_is_admin_manage_guild_fallback_only_when_role_unset():
+    # 관리역할 미설정(0) 길드: 디스코드 Manage Guild/Administrator 폴백 통과
+    assert is_admin(frozenset(), 0, has_manage_guild=True) is True
+    # 관리역할 설정(999) 길드: Manage Guild만 있고 역할 없으면 거부 (G1 핵심 — 기존 보안 불변)
+    assert is_admin(frozenset(), 999, has_manage_guild=True) is False
+    # 설정 길드 + 역할 보유 → 통과
+    assert is_admin(frozenset({999}), 999, has_manage_guild=False) is True
+    # 미설정 + 권한 없음 → 거부
+    assert is_admin(frozenset(), 0, has_manage_guild=False) is False
+    # owner 는 무엇이든 통과
+    assert is_admin(frozenset(), 0, is_owner=True, has_manage_guild=False) is True
+
+
+def test_adapter_resolves_per_guild_admin_role():
+    import types
+
+    class _FakeSettings:
+        def __init__(self, mapping):
+            self._m = mapping
+
+        def get(self, gid):
+            from dcm.service.guild_settings import GuildSettings
+
+            return GuildSettings(guild_id=str(gid), admin_role_id=self._m.get(int(gid), 0))
+
+    a = PycordAdapter(
+        token="x", bot_name="지우", guild_id=123, admin_role_id=999, guild_settings=_FakeSettings({100: 555})
+    )
+    assert a._guild_admin_role(100) == 555  # 설정된 길드 → 그 역할
+    assert a._guild_admin_role(200) == 0  # 미설정 길드 → 0(=Manage Guild 폴백 트리거)
+    # has_manage_guild 해석
+    assert a._has_manage_guild(types.SimpleNamespace(guild_permissions=types.SimpleNamespace(manage_guild=True, administrator=False))) is True
+    assert a._has_manage_guild(types.SimpleNamespace(guild_permissions=types.SimpleNamespace(manage_guild=False, administrator=True))) is True
+    assert a._has_manage_guild(types.SimpleNamespace(guild_permissions=types.SimpleNamespace(manage_guild=False, administrator=False))) is False
+    assert a._has_manage_guild(types.SimpleNamespace()) is False
+
+
+def test_adapter_no_settings_falls_back_to_env_admin_role():
+    # settings 미주입(단일길드 호환): env 시드 admin_role_id 사용
+    a = PycordAdapter(token="x", bot_name="지우", guild_id=123, admin_role_id=999)
+    assert a._guild_admin_role(123) == 999
+    assert a._guild_admin_role(456) == 999  # settings 없으면 모든 길드가 env 값

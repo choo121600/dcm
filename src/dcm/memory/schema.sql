@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS memories (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   kind           TEXT NOT NULL,              -- episodic | semantic | self
   subject_id     TEXT,                       -- related person (author id) or topic key
+  guild_id       TEXT,                       -- owning guild (per-guild isolation; backfilled by _migrate)
   channel_id     TEXT,
   content        TEXT NOT NULL,              -- the memory, normalized to 1-2 sentences
   importance     REAL NOT NULL,              -- 1-10, scored by the LLM at ingest time
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS forgotten_memories (
   original_id  INTEGER,
   kind         TEXT,
   subject_id   TEXT,
+  guild_id     TEXT,
   content      TEXT,
   importance   REAL,
   reason       TEXT,

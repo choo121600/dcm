@@ -21,6 +21,7 @@ async def main() -> None:
             weights=(0.55, 0.20, 0.25),
             half_life_base_days=3.0,
             subject_boost=0.1,
+            seed_guild_id="1",
         )
         now = 1_000_000.0
         old = now - 60 * DAY
