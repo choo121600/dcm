@@ -19,11 +19,12 @@ def _snowflake(days_ago: float) -> str:
     return str((int(ts_ms) - DISCORD_EPOCH_MS) << 22)
 
 
-def _chan(cid, name, *, type=0, days_ago=None, overwrite_role_ids=()):
+def _chan(cid, name, *, type=0, days_ago=None, overwrite_role_ids=(), parent_id=None):
     return {
         "id": str(cid),
         "name": name,
         "type": type,
+        "parent_id": str(parent_id) if parent_id is not None else None,
         "last_message_id": _snowflake(days_ago) if days_ago is not None else None,
         "overwrite_role_ids": [str(r) for r in overwrite_role_ids],
     }
@@ -123,7 +124,7 @@ def test_role_used_only_by_archived_channel_is_deleted():
 def test_empty_plan():
     plan = plan_cleanup([], [], now_ms=NOW_MS)
     assert plan.empty
-    assert "없어" in plan.summary()
+    assert "0개" in plan.summary()  # 빈 계획: 모든 섹션 0개
 
 
 def test_summary_lists_counts():
@@ -131,14 +132,25 @@ def test_summary_lists_counts():
     roles = [_role(9, "orphan", member_count=0)]
     plan = plan_cleanup(chans, roles, now_ms=NOW_MS, inactive_days=90)
     s = plan.summary()
-    assert "채널 1개" in s and "역할 1개" in s and "#dead" in s and "@orphan" in s
-    assert "되돌릴 수 없어" in s  # 역할 삭제 경고
+    assert "비활성 채널: 1개" in s and "고아 역할: 1개" in s and "#dead" in s and "@orphan" in s
 
 
 def test_protected_role_ids_are_kept():
     """protected_role_ids(예: 레벨 보상 역할)는 멤버 0명이어도 삭제 후보에서 제외된다."""
     plan = plan_cleanup([], [_role(9, "Lv10 보상", member_count=0)], now_ms=NOW_MS, protected_role_ids={9})
     assert plan.delete_roles == []
+
+
+def test_channel_in_archive_is_purge_target_not_archive():
+    """이미 '📦 아카이브' 안에 있는 채널은 퍼지(삭제) 대상이고 다시 아카이브하지 않는다."""
+    chans = [
+        _chan(50, "📦 아카이브", type=4),
+        _chan(1, "old-dead", type=0, days_ago=300, parent_id=50),  # 아카이브 안 → 퍼지
+        _chan(2, "fresh-dead", type=0, days_ago=300),  # 아카이브 밖 → 아카이브
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.purge_channels] == ["old-dead"]
+    assert [c.name for c in plan.archive_channels] == ["fresh-dead"]
 
 
 # ── 서비스 실행(드라이런→확인) ───────────────────────────────────────────
@@ -148,6 +160,10 @@ class _FakeAdmin:
         self._roles = roles
         self.hidden: list = []
         self.deleted_roles: list = []
+        self.deleted_channels: list = []
+        self.created_categories: list = []
+        self.moved: list = []
+        self._next_cat = 9000
 
     async def list_channels(self, guild_id):
         return self._channels
@@ -155,30 +171,66 @@ class _FakeAdmin:
     async def list_roles(self, guild_id):
         return self._roles
 
+    async def create_category(self, guild_id, name, *, reason):
+        self._next_cat += 1
+        self.created_categories.append((self._next_cat, name))
+        return str(self._next_cat)
+
+    async def edit_channel(self, guild_id, channel_id, *, name=None, category_id=None, reason):
+        self.moved.append((channel_id, category_id))
+
     async def set_channel_role_overwrite(self, guild_id, channel_id, role_id, *, view, reason):
         self.hidden.append((channel_id, role_id, view))
+
+    async def delete_channel(self, guild_id, channel_id, *, reason):
+        self.deleted_channels.append(channel_id)
 
     async def delete_role(self, guild_id, role_id, *, reason):
         self.deleted_roles.append(role_id)
 
 
-def test_service_cleanup_dryrun_then_confirm_executes():
-    """cleanup_inactive: 토큰 없으면 미리보기(실행X), 토큰 주면 보관(숨김)+역할 삭제 실행."""
-    chans = [_chan(1, "dead", days_ago=None)]
-    roles = [_role(9, "orphan", member_count=0)]
-    admin = _FakeAdmin(chans, roles)
+def test_service_archive_dryrun_then_confirm_moves_and_hides():
+    """cleanup_archive: 토큰 없으면 미리보기(실행X); 토큰 주면 아카이브 카테고리 생성 후 이동+숨김."""
+    admin = _FakeAdmin([_chan(1, "dead", days_ago=None)], [])
     svc = GuildAdminService(admin, PendingConfirmations())
 
     async def scenario():
-        res = await svc.cleanup_inactive(guild_id=100, actor_name="a", actor_id=1)
+        res = await svc.cleanup_archive(guild_id=100, actor_name="a", actor_id=1)
         assert res.needs_confirmation and res.confirmation_token
-        assert admin.hidden == [] and admin.deleted_roles == []  # 드라이런: 실행 안 함
-        res2 = await svc.cleanup_inactive(
+        assert admin.moved == [] and admin.created_categories == []  # 드라이런: 실행 안 함
+        res2 = await svc.cleanup_archive(
             guild_id=100, actor_name="a", actor_id=1, confirm_token=res.confirmation_token
         )
         assert res2.ok
-        # dead 채널(id 1)을 @everyone(role_id==guild_id 100) view=False 로 숨김; alive(2)는 그대로
-        assert admin.hidden == [(1, 100, False)]
+        assert len(admin.created_categories) == 1  # 아카이브 카테고리 1개 생성
+        new_cat = admin.created_categories[0][0]
+        assert admin.moved == [(1, new_cat)]  # dead 채널을 아카이브로 이동
+        # 카테고리·채널 모두 @everyone(=100) 숨김; 삭제는 안 함
+        assert (1, 100, False) in admin.hidden and (new_cat, 100, False) in admin.hidden
+        assert admin.deleted_channels == []
+
+    asyncio.run(scenario())
+
+
+def test_service_purge_dryrun_then_confirm_deletes():
+    """cleanup_purge: 아카이브 안 채널 + 고아 역할 삭제 + 빈 아카이브 카테고리 정리."""
+    chans = [
+        _chan(50, "📦 아카이브", type=4),
+        _chan(1, "archived", type=0, days_ago=300, parent_id=50),
+    ]
+    admin = _FakeAdmin(chans, [_role(9, "orphan", member_count=0)])
+    svc = GuildAdminService(admin, PendingConfirmations())
+
+    async def scenario():
+        res = await svc.cleanup_purge(guild_id=100, actor_name="a", actor_id=1)
+        assert res.needs_confirmation and res.confirmation_token
+        assert admin.deleted_channels == [] and admin.deleted_roles == []  # 드라이런
+        res2 = await svc.cleanup_purge(
+            guild_id=100, actor_name="a", actor_id=1, confirm_token=res.confirmation_token
+        )
+        assert res2.ok
+        assert 1 in admin.deleted_channels  # 아카이브 안 채널 삭제
+        assert 50 in admin.deleted_channels  # 비워진 아카이브 카테고리 삭제
         assert admin.deleted_roles == [9]
 
     asyncio.run(scenario())
@@ -190,5 +242,5 @@ def test_service_cleanup_report_is_readonly():
     svc = GuildAdminService(admin, PendingConfirmations())
     res = asyncio.run(svc.cleanup_report(guild_id=100))
     assert res.ok and not res.needs_confirmation
-    assert admin.hidden == [] and admin.deleted_roles == []
+    assert admin.moved == [] and admin.deleted_channels == [] and admin.deleted_roles == []
     assert "#dead" in res.detail and "@orphan" in res.detail

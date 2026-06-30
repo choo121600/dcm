@@ -934,7 +934,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             await ctx.respond("\n".join(lines), ephemeral=True)
 
         @self.admin_command(
-            name="cleanup-report", description="비활성 채널/고아 역할 정리 후보를 미리 본다(변경 없음)."
+            name="cleanup-report", description="아카이브/삭제 예정 채널·역할을 미리 본다(변경 없음)."
         )
         async def cleanup_report_cmd(ctx, days: int = 90):
             gid = self._ctx_guild(ctx)
@@ -952,15 +952,37 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             )
 
         @self.admin_command(
-            name="cleanup-inactive",
-            description="비활성 채널 보관 + 고아 역할 삭제(고위험; 확인 필요).",
+            name="cleanup-archive",
+            description="비활성 채널을 📦 아카이브 카테고리로 이동(숨김; 되돌림 가능; 확인 필요).",
         )
-        async def cleanup_inactive_cmd(ctx, days: int = 90, confirm: bool = False):
+        async def cleanup_archive_cmd(ctx, days: int = 90, confirm: bool = False):
             gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
             s = self._settings.get(gid) if self._settings else None
             await self._run_op(
                 ctx,
-                lambda t: self._service.cleanup_inactive(
+                lambda t: self._service.cleanup_archive(
+                    guild_id=gid,
+                    actor_name=an,
+                    actor_id=aid,
+                    inactive_days=days,
+                    admin_role_id=(int(s.admin_role_id or 0) if s else 0),
+                    welcome_channel_id=(int(s.welcome_channel_id or 0) if s else 0),
+                    protected_role_ids=self._reward_role_ids(gid),
+                    confirm_token=t,
+                ),
+                confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="cleanup-purge",
+            description="📦 아카이브 안 채널 + 고아 역할을 영구 삭제(되돌릴 수 없음; 확인 필요).",
+        )
+        async def cleanup_purge_cmd(ctx, days: int = 90, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            s = self._settings.get(gid) if self._settings else None
+            await self._run_op(
+                ctx,
+                lambda t: self._service.cleanup_purge(
                     guild_id=gid,
                     actor_name=an,
                     actor_id=aid,

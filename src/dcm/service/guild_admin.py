@@ -18,7 +18,13 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from .cleanup import DEFAULT_INACTIVE_DAYS, plan_cleanup
+from .cleanup import (
+    ARCHIVE_CATEGORY_BASE,
+    DEFAULT_INACTIVE_DAYS,
+    MAX_CHANNELS_PER_CATEGORY,
+    find_archive_category_ids,
+    plan_cleanup,
+)
 
 if TYPE_CHECKING:  # annotation only — never import platform/base at runtime (keeps service discord-free)
     from ..platform.base import GuildAdmin
@@ -488,7 +494,7 @@ class GuildAdminService:
         )
         return OpResult(True, plan.summary()[:1900])
 
-    async def cleanup_inactive(
+    async def cleanup_archive(
         self,
         *,
         guild_id,
@@ -500,17 +506,51 @@ class GuildAdminService:
         protected_role_ids=(),
         confirm_token=None,
     ) -> OpResult:
-        """비활성 채널 보관(숨김) + 고아 역할 삭제 (고위험, 항상 confirm). 드라이런→토큰 캐시→실행."""
+        """비활성 채널을 '📦 아카이브' 카테고리로 이동(+멤버 숨김). 되돌릴 수 있음. 드라이런→토큰→실행."""
+        channels = await self._admin.list_channels(guild_id)
+        plan = plan_cleanup(
+            channels,
+            [],
+            now_ms=time.time() * 1000,
+            inactive_days=inactive_days,
+            admin_role_id=admin_role_id,
+            welcome_channel_id=welcome_channel_id,
+            protected_role_ids=protected_role_ids,
+        )
         if confirm_token is not None:
-            plan = self._cleanup_cache.pop(confirm_token, None)
-            if plan is None:
+            if self._cleanup_cache.pop(confirm_token, None) != "archive":
                 return OpResult(
                     False,
-                    "정리 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
+                    "아카이브 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
                     needs_confirmation=True,
                     risk=RISK_HIGH,
                 )
-            return await self._execute_cleanup(guild_id, actor_name, actor_id, plan)
+            return await self._execute_archive(guild_id, actor_name, actor_id, channels, plan)
+        if not plan.archive_channels:
+            return OpResult(True, "아카이브로 옮길 비활성 채널이 없어 ✅")
+        token = make_confirmation_token()
+        self._cleanup_cache[token] = "archive"
+        return OpResult(
+            False,
+            plan.archive_summary()[:1900],
+            needs_confirmation=True,
+            confirmation_token=token,
+            risk=RISK_HIGH,
+        )
+
+    async def cleanup_purge(
+        self,
+        *,
+        guild_id,
+        actor_name,
+        actor_id,
+        inactive_days=DEFAULT_INACTIVE_DAYS,
+        admin_role_id=0,
+        welcome_channel_id=0,
+        protected_role_ids=(),
+        confirm_token=None,
+    ) -> OpResult:
+        """'📦 아카이브' 안 모든 채널 삭제 + 고아 역할 삭제 (영구, 항상 confirm). 드라이런→토큰→실행."""
         channels = await self._admin.list_channels(guild_id)
         roles = await self._admin.list_roles(guild_id)
         plan = plan_cleanup(
@@ -522,42 +562,94 @@ class GuildAdminService:
             welcome_channel_id=welcome_channel_id,
             protected_role_ids=protected_role_ids,
         )
-        if plan.empty:
-            return OpResult(True, "정리할 비활성 채널이나 고아 역할이 없어 ✅")
+        if confirm_token is not None:
+            if self._cleanup_cache.pop(confirm_token, None) != "purge":
+                return OpResult(
+                    False,
+                    "퍼지 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
+                    needs_confirmation=True,
+                    risk=RISK_HIGH,
+                )
+            return await self._execute_purge(guild_id, actor_name, actor_id, channels, plan)
+        if not plan.purge_channels and not plan.delete_roles:
+            return OpResult(True, "아카이브가 비어 있고 삭제할 고아 역할도 없어 ✅")
         token = make_confirmation_token()
-        self._cleanup_cache[token] = plan
+        self._cleanup_cache[token] = "purge"
         return OpResult(
             False,
-            plan.summary()[:1900],
+            plan.purge_summary()[:1900],
             needs_confirmation=True,
             confirmation_token=token,
             risk=RISK_HIGH,
         )
 
-    async def _execute_cleanup(self, guild_id, actor_name, actor_id, plan) -> OpResult:
-        reason = audit_reason(actor_name, actor_id, "cleanup inactive channels/roles")
-        archived: list[str] = []
-        deleted: list[str] = []
+    async def _execute_archive(self, guild_id, actor_name, actor_id, channels, plan) -> OpResult:
+        reason = audit_reason(actor_name, actor_id, "archive inactive channels")
+        counts: dict[int, int] = {}
+        for c in channels:
+            p = c.get("parent_id")
+            if p:
+                counts[int(p)] = counts.get(int(p), 0) + 1
+        slots = [
+            [cid, MAX_CHANNELS_PER_CATEGORY - counts.get(cid, 0)]
+            for cid in sorted(find_archive_category_ids(channels))
+        ]
+        moved: list[str] = []
         failed: list[str] = []
-        # 채널 보관 = @everyone(역할 id == 길드 id) 열람 차단으로 숨김 (되돌릴 수 있음)
+
+        async def slot_with_space():
+            for s in slots:
+                if s[1] > 0:
+                    return s
+            n = len(slots) + 1
+            nm = ARCHIVE_CATEGORY_BASE if n == 1 else f"{ARCHIVE_CATEGORY_BASE} {n}"
+            nid = int(await self._admin.create_category(guild_id, nm, reason=reason))
+            await self._admin.set_channel_role_overwrite(guild_id, nid, guild_id, view=False, reason=reason)
+            s = [nid, MAX_CHANNELS_PER_CATEGORY]
+            slots.append(s)
+            return s
+
         for ch in plan.archive_channels:
             try:
-                await self._admin.set_channel_role_overwrite(
-                    guild_id, ch.id, guild_id, view=False, reason=reason
-                )
-                archived.append(ch.name)
+                s = await slot_with_space()
+                await self._admin.edit_channel(guild_id, ch.id, category_id=s[0], reason=reason)
+                await self._admin.set_channel_role_overwrite(guild_id, ch.id, guild_id, view=False, reason=reason)
+                s[1] -= 1
+                moved.append(ch.name)
             except Exception as exc:  # noqa: BLE001 - 부분 실패 보고, 자동 롤백 없음
+                failed.append(f"채널 {ch.name}: {exc}")
+        parts = [f"채널 {len(moved)}개 아카이브로 이동(숨김)"]
+        if failed:
+            parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
+        return OpResult(True, ("아카이브 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
+
+    async def _execute_purge(self, guild_id, actor_name, actor_id, channels, plan) -> OpResult:
+        reason = audit_reason(actor_name, actor_id, "purge archive channels + orphan roles")
+        deleted_ch: list[str] = []
+        deleted_role: list[str] = []
+        failed: list[str] = []
+        for ch in plan.purge_channels:
+            try:
+                await self._admin.delete_channel(guild_id, ch.id, reason=reason)
+                deleted_ch.append(ch.name)
+            except Exception as exc:  # noqa: BLE001
                 failed.append(f"채널 {ch.name}: {exc}")
         for r in plan.delete_roles:
             try:
                 await self._admin.delete_role(guild_id, r.id, reason=reason)
-                deleted.append(r.name)
+                deleted_role.append(r.name)
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"역할 {r.name}: {exc}")
-        parts = [f"채널 {len(archived)}개 보관(숨김)", f"역할 {len(deleted)}개 삭제"]
+        # 비워진 아카이브 카테고리 정리
+        for cid in find_archive_category_ids(channels):
+            try:
+                await self._admin.delete_channel(guild_id, cid, reason=reason)
+            except Exception:  # noqa: BLE001
+                pass
+        parts = [f"채널 {len(deleted_ch)}개 삭제", f"역할 {len(deleted_role)}개 삭제"]
         if failed:
             parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
-        return OpResult(True, ("정리 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
+        return OpResult(True, ("퍼지 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
 
 
 class RateLimiter:
