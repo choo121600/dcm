@@ -106,3 +106,36 @@ def test_handle_add_writes_guild_id_no_null_orphan():
         s.close()
         assert nulls == 0  # 핸들 경유 add 는 NULL orphan 미생성
         assert g == "77"
+
+
+def test_retrieve_excludes_other_subjects_exfiltration_guard():
+    """§14.3 탈취 가드: 회상(scope_to_subject=True)은 *다른 사람*에 대한 기억을 컨텍스트에 싣지 않는다.
+
+    프롬프트 인젝션으로 페르소나를 탈옥시켜도, 타인의 개인 기억은 애초에 LLM 컨텍스트에
+    들어가지 않으므로 발화로 유출될 수 없다. NULL-subject(일반) 기억만 누구에게나 회상된다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(str(Path(tmp) / "m.db"))
+        g = s.for_guild("G")
+        _add(g, "alice의 비밀 전화번호", subject="alice", emb=[1.0, 0.0, 0.0])
+        _add(g, "서버 일반 공지", subject=None, emb=[1.0, 0.0, 0.0])
+        # bob이 물어보면: alice 기억은 후보에서 제외, NULL-subject 일반 기억만 허용
+        res = g.retrieve([1.0, 0.0, 0.0], now=1001.0, subject_id="bob", top_n=10)
+        contents = [m.content for m in res]
+        assert "alice의 비밀 전화번호" not in contents, "다른 사람 기억이 회상에 노출됨(탈취 가드 실패)"
+        assert "서버 일반 공지" in contents
+        # alice 본인은 자기 기억을 회상한다(스코프가 본인은 막지 않음)
+        own = g.retrieve([1.0, 0.0, 0.0], now=1001.0, subject_id="alice", top_n=10)
+        assert "alice의 비밀 전화번호" in [m.content for m in own]
+        s.close()
+
+
+def test_self_memories_excluded_from_recall():
+    """self(봇 자기) 기억은 회상 후보에서 제외된다(시스템 프롬프트로 별도 주입)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(str(Path(tmp) / "m.db"))
+        g = s.for_guild("G")
+        _add(g, "나는 디스코드 관리 도우미다", subject=None, kind="self", emb=[1.0, 0.0, 0.0])
+        res = g.retrieve([1.0, 0.0, 0.0], now=1001.0, subject_id="bob", top_n=10)
+        assert res == [], "self 기억이 일반 회상에 노출됨"
+        s.close()
