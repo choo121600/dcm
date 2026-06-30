@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS guild_settings (
   leveling_top_n            INTEGER,
   leveling_decay_enabled    INTEGER,
   leveling_decay_shadow     INTEGER,
+  leveling_danger_enabled   INTEGER,
+  leveling_injection_enabled INTEGER,
   updated_at                REAL
 );
 """
@@ -39,6 +41,8 @@ _SETTABLE = frozenset(
         "leveling_top_n",
         "leveling_decay_enabled",
         "leveling_decay_shadow",
+        "leveling_danger_enabled",
+        "leveling_injection_enabled",
     }
 )
 
@@ -55,6 +59,8 @@ class GuildSettings:
     leveling_top_n: int | None = None  # None = 서비스 기본(10)
     leveling_decay_enabled: bool | None = None  # None = 기본 OFF(신뢰-하락 비활성)
     leveling_decay_shadow: bool | None = None  # None = 기본 enforce(decay 활성 시 실제 차감)
+    leveling_danger_enabled: bool | None = None  # None = 기본 OFF(위험 워드리스트 비활성)
+    leveling_injection_enabled: bool | None = None  # None = 기본 OFF(인젝션 신호 비활성)
 
 
 class GuildSettingsStore:
@@ -80,6 +86,8 @@ class GuildSettingsStore:
             ("leveling_top_n", "INTEGER"),
             ("leveling_decay_enabled", "INTEGER"),
             ("leveling_decay_shadow", "INTEGER"),
+            ("leveling_danger_enabled", "INTEGER"),
+            ("leveling_injection_enabled", "INTEGER"),
         ):
             if col not in cols:
                 self._db.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {ddl}")
@@ -124,6 +132,14 @@ class GuildSettingsStore:
             leveling_decay_shadow=(
                 None if row["leveling_decay_shadow"] is None else bool(row["leveling_decay_shadow"])
             ),
+            leveling_danger_enabled=(
+                None if row["leveling_danger_enabled"] is None else bool(row["leveling_danger_enabled"])
+            ),
+            leveling_injection_enabled=(
+                None
+                if row["leveling_injection_enabled"] is None
+                else bool(row["leveling_injection_enabled"])
+            ),
         )
 
     def _upsert(self, guild_id: int | str, field: str, value) -> None:
@@ -163,6 +179,12 @@ class GuildSettingsStore:
 
     def set_leveling_decay_shadow(self, guild_id: int | str, shadow: bool) -> None:
         self._upsert(guild_id, "leveling_decay_shadow", 1 if shadow else 0)
+
+    def set_leveling_danger_enabled(self, guild_id: int | str, enabled: bool) -> None:
+        self._upsert(guild_id, "leveling_danger_enabled", 1 if enabled else 0)
+
+    def set_leveling_injection_enabled(self, guild_id: int | str, enabled: bool) -> None:
+        self._upsert(guild_id, "leveling_injection_enabled", 1 if enabled else 0)
 
     def close(self) -> None:
         self._db.close()

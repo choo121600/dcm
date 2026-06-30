@@ -128,9 +128,24 @@ def test_dead_channel_role_with_members_is_deleted():
     assert "멤버 6명" in plan.delete_roles[0].reason
 
 
-def test_identity_role_with_members_unused_is_kept():
-    """채널과 무관한 정체성/관심사 역할(멤버 보유 + 어디에도 미사용)은 보존."""
+def test_noncohort_member_role_unused_is_removed():
+    """계절(기수)명이 없는 채널-미사용 멤버 역할은 제거 후보(사용자 정책)."""
     plan = plan_cleanup([], [_role(9, "PYTHON", member_count=24)], now_ms=NOW_MS, inactive_days=90)
+    assert [r.name for r in plan.delete_roles] == ["PYTHON"]
+    assert "비기수" in plan.delete_roles[0].reason
+
+
+def test_cohort_season_role_is_kept():
+    """이름에 계절(Summer/Winter 등)이 있는 기수 역할은 멤버 보유·채널 미사용이어도 보존."""
+    roles = [_role(1, "2024 Summer", member_count=40), _role(2, "25-WINTER", member_count=30)]
+    plan = plan_cleanup([], roles, now_ms=NOW_MS, inactive_days=90)
+    assert plan.delete_roles == []
+
+
+def test_staff_named_role_is_kept():
+    """이름 보호어(운영/관리/모더)가 든 역할은 멤버 보유·채널 미사용이어도 보존."""
+    roles = [_role(1, "운영진", member_count=8), _role(2, "관리자", member_count=3)]
+    plan = plan_cleanup([], roles, now_ms=NOW_MS, inactive_days=90)
     assert plan.delete_roles == []
 
 
@@ -355,3 +370,11 @@ def test_notext_voice_in_active_category_is_kept():
     plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
     names = {c.name for c in plan.archive_channels}
     assert "스터디룸2" not in names and "모각코" not in names
+
+
+def test_subproject_cohort_role_is_removed_umbrella_kept():
+    """계절 뒤 프로젝트명이 붙은 세부 기수(25-SUMMER-DJANGO)는 제거; 엄브렐러(25-SUMMER)는 보존."""
+    roles = [_role(1, "25-SUMMER", member_count=65), _role(2, "25-SUMMER-DJANGO", member_count=6)]
+    plan = plan_cleanup([], roles, now_ms=NOW_MS, inactive_days=90)
+    names = [r.name for r in plan.delete_roles]
+    assert "25-SUMMER-DJANGO" in names and "25-SUMMER" not in names

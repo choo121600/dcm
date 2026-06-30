@@ -14,9 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dcm.leveling import scoring
-from dcm.leveling.scoring import caps_ratio, cum_cost, level, penalty_weight
+from dcm.leveling.scoring import PENALTY_INJECTION, caps_ratio, cum_cost, danger_score, level, penalty_weight
 from dcm.leveling.service import PENALTY_WINDOW_CAP, LevelingService
 from dcm.leveling.store import LevelingStore
+from dcm.memory.ingest import _parse_items
 from dcm.service.guild_settings import GuildSettings, GuildSettingsStore
 
 _LONG = "오늘 회의 자료 정리해서 공유드립니다 확인 부탁드려요"
@@ -308,5 +309,106 @@ def test_penalty_within_tier_does_not_change_quota():
                 svc.record_message("g", "u", _SPAM, monotonic_time=100.0 + i * 0.1, now=2.0)
             _a1, rem1 = svc.quota_check("g", "u", "web", day="2099-01-01")
             assert rem1 == rem0  # 같은 quota 티어(레벨 5~9) 내 변동 → 게이팅 무변
+        finally:
+            store.close()
+
+
+# ───────────────── Phase 2: 인젝션 신호 / 위험 워드리스트 / on_penalty ─────────────────
+
+
+def test_parse_items_envelope_with_injection_flag():
+    items, injection = _parse_items('{"memories": [{"content": "x", "importance": 3}], "injection": true}')
+    assert injection is True
+    assert len(items) == 1
+    items2, inj2 = _parse_items('[{"content": "y", "importance": 2}]')  # 레거시 배열
+    assert inj2 is False
+    assert len(items2) == 1
+
+
+def test_danger_score_pure():
+    assert danger_score("free nitro here") == scoring.PENALTY_DANGER
+    assert danger_score("정상적인 대화입니다 여러분") == 0
+
+
+def test_apply_signal_penalty_injection_when_enabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _Settings(leveling_decay_enabled=True, leveling_injection_enabled=True)
+        svc, store = _service(tmp, settings)
+        try:
+            store.add_xp("g", "u", 300, now=1.0)
+            assert svc.apply_signal_penalty("g", "u", PENALTY_INJECTION, signal="injection", now=2.0) is True
+            xp, _ = store.get_record("g", "u")
+            assert xp == 300 + PENALTY_INJECTION  # 300 - 60
+        finally:
+            store.close()
+
+
+def test_apply_signal_penalty_gated_off_when_injection_disabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp, _Settings(leveling_decay_enabled=True))  # injection 토글 off
+        try:
+            store.add_xp("g", "u", 300, now=1.0)
+            assert svc.apply_signal_penalty("g", "u", PENALTY_INJECTION, signal="injection", now=2.0) is False
+            xp, _ = store.get_record("g", "u")
+            assert xp == 300  # 차감 없음
+        finally:
+            store.close()
+
+
+def test_apply_signal_penalty_shadow_does_not_deduct():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _Settings(
+            leveling_decay_enabled=True, leveling_injection_enabled=True, leveling_decay_shadow=True
+        )
+        svc, store = _service(tmp, settings)
+        try:
+            store.add_xp("g", "u", 300, now=1.0)
+            assert svc.apply_signal_penalty("g", "u", PENALTY_INJECTION, signal="injection", now=2.0) is False
+            xp, _ = store.get_record("g", "u")
+            assert xp == 300  # shadow: 로그만, 차감 없음
+        finally:
+            store.close()
+
+
+def test_danger_wordlist_penalizes_when_enabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _Settings(leveling_decay_enabled=True, leveling_danger_enabled=True)
+        svc, store = _service(tmp, settings)
+        try:
+            store.add_xp("g", "u", 300, now=1.0)
+            svc.record_message(
+                "g", "u", "FREE NITRO claim steamcommunity.com/gift/xyz", monotonic_time=10.0, now=2.0
+            )
+            xp, _ = store.get_record("g", "u")
+            assert xp < 300  # 위험(스캠) 콘텐츠 차감
+        finally:
+            store.close()
+
+
+def test_danger_disabled_by_default_no_penalty():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp, _Settings(leveling_decay_enabled=True))  # danger 토글 off
+        try:
+            store.add_xp("g", "u", 300, now=1.0)
+            svc.record_message(
+                "g", "u", "free nitro steamcommunity.com/gift/x", monotonic_time=10.0, now=2.0
+            )
+            xp, _ = store.get_record("g", "u")
+            assert xp >= 300  # danger off → 차감 없음
+        finally:
+            store.close()
+
+
+def test_on_penalty_callback_fires_on_enforced_penalty():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp, _Settings(leveling_decay_enabled=True))
+        try:
+            fired = []
+            for i in range(scoring.FLOOD_THRESHOLD + 2):
+                svc.record_message(
+                    "g", "u", _SPAM, monotonic_time=100.0 + i * 0.1, now=2.0,
+                    on_penalty=lambda: fired.append(1),
+                )
+            assert fired  # 실제 차감 시 on_penalty 트리거(→ adapter reconcile/revoke)
         finally:
             store.close()

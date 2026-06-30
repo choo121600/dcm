@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import commands
 from .embeddings import Embedder
+from .leveling.scoring import PENALTY_INJECTION
 from .llm import LLMClient
 from .memory.ingest import IngestionPipeline
 from .memory.store import MemoryStore
@@ -228,7 +229,7 @@ class Orchestrator:
         self, incoming: IncomingMessage, user_text: str, reply: str
     ) -> None:
         try:
-            await self._ingest.ingest(
+            injection = await self._ingest.ingest(
                 author_id=incoming.author_id,
                 author_name=incoming.author_name,
                 channel_id=incoming.channel_id,
@@ -237,5 +238,13 @@ class Orchestrator:
                 now=time.time(),
                 guild_id=incoming.guild_id,
             )
+            # 인젝션 신호 → 신뢰-하락 페널티(leveling 내부에서 decay+injection 토글·cap·shadow 게이팅).
+            if injection and self._leveling is not None and incoming.guild_id:
+                self._leveling.apply_signal_penalty(
+                    incoming.guild_id,
+                    incoming.author_id,
+                    PENALTY_INJECTION,
+                    signal="injection",
+                )
         except Exception:
             log.exception("background ingest failed")

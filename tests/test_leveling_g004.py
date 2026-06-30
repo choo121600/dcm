@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dcm.leveling.scoring import utc_day
+from dcm.leveling.scoring import cum_cost, utc_day
 from dcm.leveling.service import DANGEROUS_PERMISSION_NAMES, LevelingService
 from dcm.leveling.store import LevelingStore
 from dcm.orchestrator import _LLM_QUOTA_REPLY, Orchestrator
@@ -259,6 +259,81 @@ def test_reconcile_no_rewards_is_noop():
             member = _member(_guild_dict(), {100: _role()})
             asyncio.run(svc.reconcile_roles(member))
             member.add_roles.assert_not_awaited()
+        finally:
+            store.close()
+
+
+def _member_rm(guild, role_lookup, *, roles=None, member_id="42"):
+    """remove_roles 까지 가진 멤버(회수 테스트용)."""
+    return types.SimpleNamespace(
+        id=member_id,
+        guild=types.SimpleNamespace(
+            id=guild["id"], me=guild["me"], default_role=guild.get("default_role"),
+            get_role=lambda rid: role_lookup.get(int(rid)),
+        ),
+        roles=roles if roles is not None else [],
+        add_roles=AsyncMock(),
+        remove_roles=AsyncMock(),
+    )
+
+
+def test_reconcile_revokes_reward_role_when_demoted_below_hysteresis():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp)
+        try:
+            store.set_role_reward("1", 5, 100)  # 레벨 5 → 역할 100
+            store.add_xp("1", "42", 50, now=1.0)  # 레벨 0 (< 5 - 1)
+            safe = _role(role_id=100, position=1)
+            member = _member_rm(_guild_dict(), {100: safe}, roles=[safe])  # 보유 중
+            asyncio.run(svc.reconcile_roles(member))
+            member.remove_roles.assert_awaited_once()
+            assert member.remove_roles.await_args.args[0] is safe
+        finally:
+            store.close()
+
+
+def test_reconcile_no_revoke_within_hysteresis_band():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp)
+        try:
+            store.set_role_reward("1", 5, 100)
+            # 레벨 4 (= reward_level - 1): 히스테리시스 밴드 → 회수 안 함(sticky)
+            store.add_xp("1", "42", cum_cost(4) + 5, now=1.0)
+            safe = _role(role_id=100, position=1)
+            member = _member_rm(_guild_dict(), {100: safe}, roles=[safe])
+            asyncio.run(svc.reconcile_roles(member))
+            member.remove_roles.assert_not_awaited()
+        finally:
+            store.close()
+
+
+def test_reconcile_does_not_revoke_without_tier_drop():
+    # AC6: 임계 이상이면 회수 없음(이미 보유 → 멱등, 역할 변동 0).
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp)
+        try:
+            store.set_role_reward("1", 1, 100)
+            store.add_xp("1", "42", 100000, now=1.0)  # 레벨 충분
+            safe = _role(role_id=100, position=1)
+            member = _member_rm(_guild_dict(), {100: safe}, roles=[safe])
+            asyncio.run(svc.reconcile_roles(member))
+            member.remove_roles.assert_not_awaited()
+            member.add_roles.assert_not_awaited()
+        finally:
+            store.close()
+
+
+def test_reconcile_does_not_revoke_unsafe_reward_role():
+    # 위험권한 역할은 _role_grant_ok 미통과 → 자동 회수 안 함(보존).
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _service(tmp)
+        try:
+            store.set_role_reward("1", 5, 100)
+            store.add_xp("1", "42", 0, now=1.0)  # 레벨 0
+            danger = _role(role_id=100, position=1, manage_roles=True)
+            member = _member_rm(_guild_dict(), {100: danger}, roles=[danger])
+            asyncio.run(svc.reconcile_roles(member))
+            member.remove_roles.assert_not_awaited()
         finally:
             store.close()
 

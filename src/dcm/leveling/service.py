@@ -12,10 +12,20 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 
 import discord
 
-from .scoring import caps_ratio, level, penalty_weight, progress, utc_day, xp_award, xp_to_next
+from .scoring import (
+    caps_ratio,
+    danger_score,
+    level,
+    penalty_weight,
+    progress,
+    utc_day,
+    xp_award,
+    xp_to_next,
+)
 from .store import LevelingStore
 
 log = logging.getLogger(__name__)
@@ -30,6 +40,7 @@ FLOOD_WINDOW_SECONDS = 10.0  # 플러딩 카운트용 슬라이딩 윈도 길이
 PENALTY_WINDOW_SECONDS = 60.0  # 페널티 빈도 cap 윈도 길이(초)
 PENALTY_WINDOW_CAP = 3  # 윈도 내 최대 페널티 횟수(오탐/게이밍 방지)
 PENALTY_DAILY_CAP = 20  # 일일 최대 페널티 횟수(UTC-day)
+LEVEL_ROLE_HYSTERESIS = 1  # 강등 시 reward_level - 이 마진 '미만'에서만 역할 회수(경계 플랩 억제)
 _EMBED_COLOR = 0x5865F2  # Discord blurple
 # 신뢰 게이팅 쿼터 티어(코드 기본값): (최소 레벨, 일일 한도). 레벨에서 파생.
 WEB_QUOTA_TIERS = ((0, 20), (5, 50), (10, 100))
@@ -153,6 +164,16 @@ class LevelingService:
         sh = getattr(settings, "leveling_decay_shadow", None) if settings is not None else None
         return False if sh is None else bool(sh)  # 기본 enforce(decay 활성 시 실제 차감)
 
+    @staticmethod
+    def _danger_enabled(settings) -> bool:
+        v = getattr(settings, "leveling_danger_enabled", None) if settings is not None else None
+        return False if v is None else bool(v)  # 기본 OFF(위험 워드리스트 비활성)
+
+    @staticmethod
+    def _injection_enabled(settings) -> bool:
+        v = getattr(settings, "leveling_injection_enabled", None) if settings is not None else None
+        return False if v is None else bool(v)  # 기본 OFF(인젝션 신호 비활성)
+
     def _maybe_evict(self, mono: float) -> None:
         if (
             len(self._last_award) < _EVICT_THRESHOLD
@@ -185,6 +206,7 @@ class LevelingService:
         monotonic_time: float | None = None,
         mention_count: int = 0,
         is_admin: bool = False,
+        on_penalty: Callable[[], None] | None = None,
     ) -> bool:
         """비봇 메시지에 질-가중 XP 적립. 인메모리 쿨다운 1차 게이트 + 설정 TTL 캐시(핫패스 DB READ 0).
 
@@ -201,18 +223,18 @@ class LevelingService:
                 flood_count = self._record_flood(key, mono)
                 self._maybe_evict(mono)  # 비적립 트래픽도 decay 맵 stale sweep 트리거
                 penalty = penalty_weight(text, flood_count, mention_count, caps_ratio(text))
-                if penalty < 0 and self._apply_penalty(
-                    guild_id,
-                    user_id,
-                    key,
-                    penalty,
-                    mono,
-                    now,
-                    settings,
-                    flood_count=flood_count,
-                    mention_count=mention_count,
-                ):
-                    return False  # 페널티가 실제 차감되면 이 메시지는 적립하지 않음
+                danger = danger_score(text) if self._danger_enabled(settings) else 0
+                penalty += danger
+                if penalty < 0:
+                    signals = f"flood={flood_count} mentions={mention_count}" + (
+                        " danger=1" if danger < 0 else ""
+                    )
+                    if self._apply_penalty(
+                        guild_id, user_id, key, penalty, mono, now, settings, signals=signals
+                    ):
+                        if on_penalty is not None:
+                            on_penalty()  # 강등 가능 → 백그라운드 reconcile(역할 회수) 트리거(P2)
+                        return False  # 페널티가 실제 차감되면 이 메시지는 적립하지 않음
             last = self._last_award.get(key)
             if last is not None and mono - last < self._cooldown(settings):
                 return False
@@ -250,8 +272,7 @@ class LevelingService:
         now: float | None,
         settings,
         *,
-        flood_count: int,
-        mention_count: int,
+        signals: str,
     ) -> bool:
         """신뢰-하락 페널티 적용. 윈도/일일 cap·shadow 가드. 실제 차감 시 True(전량 audit).
 
@@ -272,7 +293,7 @@ class LevelingService:
         dkey = (key[0], key[1], day)
         if self._penalty_daily.get(dkey, 0) >= PENALTY_DAILY_CAP:
             return False  # 일일 cap 초과
-        signals = f"flood={flood_count} mentions={mention_count}"
+
         if self._decay_shadow(settings):
             log.info(
                 "leveling decay SHADOW (would-penalize): guild=%s user=%s delta=%s %s",
@@ -293,6 +314,46 @@ class LevelingService:
             signals,
         )
         return True
+
+    def apply_signal_penalty(
+        self,
+        guild_id: int | str,
+        user_id: int | str,
+        penalty_xp: int,
+        *,
+        signal: str,
+        now: float | None = None,
+    ) -> bool:
+        """비핫패스(ingest 등) 신호 기반 신뢰-하락 페널티(인젝션/위험).
+
+        decay + 신호별 토글 활성 시에만, 윈도/일일 cap·shadow·audit 를 _apply_penalty 로 공유한다.
+        핫패스 아님 — settings 캐시 read 허용. 반환 True = 실제 차감.
+        """
+        try:
+            if int(penalty_xp) >= 0:
+                return False
+            mono = time.monotonic()
+            settings = self._cached_settings(guild_id, mono)
+            if not self._decay_enabled(settings):
+                return False
+            if signal == "injection" and not self._injection_enabled(settings):
+                return False
+            if signal == "danger" and not self._danger_enabled(settings):
+                return False
+            key = (str(guild_id), str(user_id))
+            return self._apply_penalty(
+                guild_id,
+                user_id,
+                key,
+                int(penalty_xp),
+                mono,
+                now,
+                settings,
+                signals=f"signal={signal}",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("leveling apply_signal_penalty failed (silent)")
+            return False
 
     # --- 신뢰 게이팅 (G003/G004): 레벨별 일일 한도 ---
 
@@ -357,7 +418,12 @@ class LevelingService:
         return (True, "ok")
 
     async def reconcile_roles(self, member) -> None:
-        """멤버 레벨에 해당하는 매핑 역할을 allow-list 가드로 무인 부여(멱등·실패 침묵)."""
+        """멤버 레벨에 맞춰 매핑 역할을 부여(도달)하거나 회수(신뢰 하락, P2)한다.
+
+        allow-list 가드(_role_grant_ok)를 통과하는 보상 역할만 대상 — 온보딩 default_role·
+        managed·위계 초과·위험권한 역할은 구조적으로 제외. 멱등·실패 침묵. 회수는
+        reward_level - LEVEL_ROLE_HYSTERESIS '미만'에서만(경계 플랩 억제).
+        """
         try:
             guild = getattr(member, "guild", None)
             if guild is None:
@@ -371,35 +437,55 @@ class LevelingService:
             bot_top = getattr(getattr(bot_member, "top_role", None), "position", None)
             member_roles = getattr(member, "roles", []) or []
             for reward_level, role_id in rewards:
-                if lvl < reward_level:
-                    continue
                 role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
                 if role is None:
                     continue  # 삭제된 역할 skip
-                if role in member_roles:
-                    continue  # 멱등: 이미 보유
-                ok, reason = self._role_grant_ok(role, guild, bot_top)
-                if not ok:
-                    log.warning(
-                        "leveling role-reward denied: guild=%s role=%s reason=%s",
-                        guild.id,
-                        role_id,
-                        reason,
-                    )
-                    continue
-                try:
-                    await member.add_roles(
-                        role, reason=f"auto-grant level>={reward_level} -> role {role_id}"
-                    )
-                    log.info(
-                        "leveling auto-grant: guild=%s user=%s level>=%s role=%s",
-                        guild.id,
-                        member.id,
-                        reward_level,
-                        role_id,
-                    )
-                except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException 등)
-                    log.exception("leveling add_roles failed (silent degrade)")
+                has_role = role in member_roles
+                if lvl >= reward_level:
+                    # 부여(grant): 도달 레벨 역할을 멱등 부여
+                    if has_role:
+                        continue  # 멱등: 이미 보유
+                    ok, reason = self._role_grant_ok(role, guild, bot_top)
+                    if not ok:
+                        log.warning(
+                            "leveling role-reward denied: guild=%s role=%s reason=%s",
+                            guild.id,
+                            role_id,
+                            reason,
+                        )
+                        continue
+                    try:
+                        await member.add_roles(
+                            role, reason=f"auto-grant level>={reward_level} -> role {role_id}"
+                        )
+                        log.info(
+                            "leveling auto-grant: guild=%s user=%s level>=%s role=%s",
+                            guild.id,
+                            member.id,
+                            reward_level,
+                            role_id,
+                        )
+                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException 등)
+                        log.exception("leveling add_roles failed (silent degrade)")
+                elif lvl < reward_level - LEVEL_ROLE_HYSTERESIS and has_role:
+                    # 회수(revoke, P2): 신뢰 하락으로 임계 미달 → 봇이 부여 가능한 보상 역할만 회수.
+                    # _role_grant_ok 미통과(managed/everyone/위계/위험권한) 역할은 보존(자동 미회수).
+                    ok, _reason = self._role_grant_ok(role, guild, bot_top)
+                    if not ok:
+                        continue
+                    try:
+                        await member.remove_roles(
+                            role, reason=f"auto-revoke level<{reward_level} (trust decay)"
+                        )
+                        log.info(
+                            "leveling auto-revoke: guild=%s user=%s level<%s role=%s",
+                            guild.id,
+                            member.id,
+                            reward_level,
+                            role_id,
+                        )
+                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException 등)
+                        log.exception("leveling remove_roles failed (silent degrade)")
         except Exception:  # noqa: BLE001
             log.exception("reconcile_roles failed (silent degrade)")
 

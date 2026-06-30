@@ -130,6 +130,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                 message.content or "",
                 mention_count=len(message.mentions) + len(getattr(message, "role_mentions", None) or []),
                 is_admin=self._has_manage_guild(message.author),
+                on_penalty=lambda: asyncio.create_task(self._safe_reconcile(message.author)),
             )
             if awarded:
                 # 적립 시(쿨다운 통과)에만 레벨→역할 무인 부여 시도(멱등·allow-list 가드, G004).

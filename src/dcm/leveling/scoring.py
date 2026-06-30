@@ -31,6 +31,22 @@ CAPS_RATIO_THRESHOLD = 0.8  # ASCII 알파벳 중 대문자 비율 임계
 PENALTY_FLOOD = -30
 PENALTY_MENTION_BURST = -25
 PENALTY_CAPS = -10
+PENALTY_DANGER = -50
+PENALTY_INJECTION = -60  # 인젝션 신호 페널티(2차; ingest 경로, 게이팅·cap·shadow 는 service)
+# 위험(스캠/피싱) 콘텐츠 보수적 마커. 길드 opt-in(기본 off)·shadow 권장 — 명백한 디스코드 스캠만 본다.
+DANGER_MARKERS = (
+    "free nitro",
+    "free discord nitro",
+    "nitro free",
+    "steamcommunity.com/gift",
+    "discordgift",
+    "discord-gift",
+    "dlscord",
+    "ip grabber",
+    "grabify.link",
+    "무료 니트로",
+    "공짜 니트로",
+)
 
 _WORD_RE = re.compile(r"[^\W_]", re.UNICODE)  # 알파벳/숫자/유니코드 단어문자 1개 이상
 _WS_RE = re.compile(r"\s+")
@@ -84,6 +100,15 @@ def penalty_weight(text: str, flood_count: int, mention_count: int, caps_ratio: 
     if len(s) >= CAPS_MIN_LEN and float(caps_ratio) >= CAPS_RATIO_THRESHOLD:
         penalty += PENALTY_CAPS
     return penalty
+
+
+def danger_score(text: str) -> int:
+    """위험(스캠/피싱) 콘텐츠 페널티 XP (<= 0). 보수적 마커 매칭만, 의존성 0(LLM/DB 없음).
+
+    오탐을 줄이려 명백한 디스코드 스캠 문구만 본다. 길드 opt-in(기본 off)·shadow 권장.
+    """
+    low = (text or "").lower()
+    return PENALTY_DANGER if any(m in low for m in DANGER_MARKERS) else 0
 
 
 def level_step(level: int) -> int:

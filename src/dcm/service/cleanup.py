@@ -147,6 +147,24 @@ def _is_protected(name: str, protected_parts) -> bool:
     return any(p.lower() in low for p in protected_parts)
 
 
+# 기수(코호트) 역할 판별용 계절 키워드 — 이 단어가 이름에 있으면 기수로 보고 보존.
+SEASON_KEYWORDS = ("summer", "winter", "spring", "fall", "autumn", "여름", "겨울", "봄", "가을")
+
+
+def _is_cohort(name: str) -> bool:
+    """엄브렐러 기수만 True(보존): 계절 키워드 + 연도/구분자만으로 된 이름(예: '2023 Summer',
+    '25-SUMMER'). 계절 뒤에 프로젝트명이 붙은 세부(25-SUMMER-DJANGO 등)는 25-SUMMER로
+    합쳐지므로 기수 아님 → 정리 대상."""
+    low = (name or "").lower()
+    if not any(k in low for k in SEASON_KEYWORDS):
+        return False
+    rest = low
+    for k in SEASON_KEYWORDS:
+        rest = rest.replace(k, "")
+    # 계절을 뺀 뒤 남는 글자(프로젝트명)가 없으면 엄브렐러 기수.
+    return not any(ch.isalpha() for ch in rest)
+
+
 def _base_name(name: str) -> str:
     """채널 이름에서 종류 접미사(음성/voice/채팅/chat/채널)를 떼고 소문자화 — 텍스트↔음성 이름쌍 매칭용."""
     s = (name or "").lower().strip()
@@ -255,21 +273,25 @@ def plan_cleanup(
         if r.get("is_default") or r.get("managed"):
             continue
         rid = int(r["id"])
+        name = r.get("name", str(rid))
         if admin_role_id and rid == int(admin_role_id):
             continue
         if rid in protected_ids:
             continue  # 외부 보호 역할(예: 레벨 보상)
+        if _is_protected(name, protected_parts):
+            continue  # 이름 보호 — 운영/관리/모더 등 스태프 역할
         if rid in live_role_refs:
             continue  # 살아있는 채널이 쓰는 역할은 보존
         mc = int(r.get("member_count", 0))
         if rid in dead_role_refs:
-            # 죽은 채널 전용 역할 — 멤버가 있어도 정리(채널이 사라져 무용). 멤버 수 표기.
-            reason = f"죽은 채널 전용·멤버 {mc}명"
-            plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), reason))
+            # 죽은 채널 전용 역할 — 멤버가 있어도 정리(채널이 사라져 무용).
+            plan.delete_roles.append(RoleAction(rid, name, f"죽은 채널 전용·멤버 {mc}명"))
         elif mc == 0:
-            # 어떤 채널에도 안 쓰이고 멤버도 0 → 고아
-            plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), "멤버 0명·미사용"))
-        # else: 채널 미사용 + 멤버 보유 → 정체성/관심사 역할로 간주, 보존
+            plan.delete_roles.append(RoleAction(rid, name, "멤버 0명·미사용"))
+        elif not _is_cohort(name):
+            # 채널 미사용 + 멤버 보유 + 기수(계절명) 아님 → 제거 후보(사용자 정책).
+            plan.delete_roles.append(RoleAction(rid, name, f"채널 미사용·멤버 {mc}명(비기수)"))
+        # else: 기수(계절명) 역할 → 보존
 
     # 고아(빈) 카테고리: 자식 채널이 0인 카테고리. 아카이브 카테고리·보호 이름은 제외.
     child_counts: dict[int, int] = {}
