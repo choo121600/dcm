@@ -34,17 +34,41 @@ def test_add_xp_accumulates_and_is_guild_isolated():
             s.close()
 
 
-def test_weighted_xp_non_decreasing():
+def test_weighted_xp_floor_zero():
+    """음수 델타(신뢰-하락 페널티)는 0 미만으로 떨어지지 않는다(하한0 클램프)."""
     with tempfile.TemporaryDirectory() as tmp:
         s = LevelingStore(_db(tmp))
         try:
-            prev = 0
-            for i in range(1, 20):
-                s.add_xp("g", "u", 3, now=float(i))
-                xp, _ = s.get_record("g", "u")
-                assert xp >= prev
-                prev = xp
-            assert prev == 3 * 19
+            s.add_xp("g", "u", 50, now=1.0)
+            s.add_xp("g", "u", -20, now=2.0)
+            xp, _ = s.get_record("g", "u")
+            assert xp == 30  # 50 - 20
+            # 큰 음수 → 0 클램프(음수 불가)
+            s.add_xp("g", "u", -1000, now=3.0)
+            xp, _ = s.get_record("g", "u")
+            assert xp == 0
+            # 바닥에서 음수 추가 누적 불가(여전히 0)
+            s.add_xp("g", "u", -5, now=4.0)
+            xp, _ = s.get_record("g", "u")
+            assert xp == 0
+            # 바닥에서 정상 적립은 즉시 회복(자연 회복, 메시지 기반)
+            s.add_xp("g", "u", 15, now=5.0)
+            xp, last = s.get_record("g", "u")
+            assert xp == 15
+            assert last == 5.0
+        finally:
+            s.close()
+
+
+def test_first_write_negative_seeds_zero():
+    """미존재 (guild,user) 에 첫 쓰기가 음수여도 0 으로 시드(2문 패턴 INSERT OR IGNORE)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = LevelingStore(_db(tmp))
+        try:
+            s.add_xp("g", "newbie", -50, now=7.0)
+            xp, last = s.get_record("g", "newbie")
+            assert xp == 0  # 음수 시드 방지
+            assert last == 7.0
         finally:
             s.close()
 

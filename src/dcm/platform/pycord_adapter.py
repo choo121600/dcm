@@ -125,7 +125,11 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         # _is_addressed 이전에 둬서 멘션이 아닌 일반 메시지도 집계한다 (P1).
         if self._leveling is not None:
             awarded = self._leveling.record_message(
-                message.guild.id, message.author.id, message.content or ""
+                message.guild.id,
+                message.author.id,
+                message.content or "",
+                mention_count=len(message.mentions) + len(getattr(message, "role_mentions", None) or []),
+                is_admin=self._has_manage_guild(message.author),
             )
             if awarded:
                 # 적립 시(쿨다운 통과)에만 레벨→역할 무인 부여 시도(멱등·allow-list 가드, G004).

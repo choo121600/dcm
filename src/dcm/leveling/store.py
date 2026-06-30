@@ -26,16 +26,21 @@ class LevelingStore:
     # --- writes (fire-and-forget, 직렬화) ---
 
     def add_xp(self, guild_id: int | str, user_id: int | str, xp: int, now: float) -> None:
+        """질-가중 XP 적립. xp 는 음수(신뢰-하락 페널티) 가능 — 하한0 클램프(2문 패턴)."""
         gid, uid, amount, ts = str(guild_id), str(user_id), int(xp), float(now)
 
         def op(conn: sqlite3.Connection) -> None:
+            # 2문 원자 패턴(단일 writer op 안에서 연속 실행): 행 시드 → MAX(0, ...) 클램프.
+            # 음수 amount(페널티)도 하한0 보장 — 신규행 첫 음수도 0 으로 시드 후 클램프된다.
             conn.execute(
-                "INSERT INTO activity_xp (guild_id, user_id, weighted_xp, last_award_at) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
-                "weighted_xp = weighted_xp + excluded.weighted_xp, "
-                "last_award_at = excluded.last_award_at",
-                (gid, uid, amount, ts),
+                "INSERT OR IGNORE INTO activity_xp (guild_id, user_id, weighted_xp, last_award_at) "
+                "VALUES (?, ?, 0, ?)",
+                (gid, uid, ts),
+            )
+            conn.execute(
+                "UPDATE activity_xp SET weighted_xp = MAX(0, weighted_xp + ?), last_award_at = ? "
+                "WHERE guild_id = ? AND user_id = ?",
+                (amount, ts, gid, uid),
             )
             conn.commit()
 

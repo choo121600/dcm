@@ -23,6 +23,15 @@ W_EMOJI_ONLY = 0.1
 W_SPAM = 0.2
 W_EMPTY = 0.0
 
+# --- 신뢰-하락(penalty) 휴리스틱 상수 (코드 기본값; penalty_weight 는 음수 XP 반환) ---
+FLOOD_THRESHOLD = 5  # 슬라이딩 윈도 내 메시지 수가 이 값을 '초과'하면 플러딩
+MENTION_BURST_MIN = 5  # 한 메시지의 멘션 수가 이 값 이상이면 멘션 폭주
+CAPS_MIN_LEN = 12  # 이 길이 이상일 때만 CAPS 판정(짧은 약어/명령어 보호)
+CAPS_RATIO_THRESHOLD = 0.8  # ASCII 알파벳 중 대문자 비율 임계
+PENALTY_FLOOD = -30
+PENALTY_MENTION_BURST = -25
+PENALTY_CAPS = -10
+
 _WORD_RE = re.compile(r"[^\W_]", re.UNICODE)  # 알파벳/숫자/유니코드 단어문자 1개 이상
 _WS_RE = re.compile(r"\s+")
 
@@ -50,6 +59,31 @@ def quality_weight(text: str) -> float:
 def xp_award(text: str, base_xp: int = BASE_XP) -> int:
     """이 메시지로 적립할 정수 XP. 항상 정수 도메인."""
     return int(round(base_xp * quality_weight(text)))
+
+
+def caps_ratio(text: str) -> float:
+    """ASCII 알파벳 중 대문자 비율 [0,1]. 알파벳이 없으면 0.0(한글 등 비-casing 문자 보호)."""
+    letters = [c for c in (text or "") if c.isascii() and c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if c.isupper()) / len(letters)
+
+
+def penalty_weight(text: str, flood_count: int, mention_count: int, caps_ratio: float) -> int:
+    """신뢰-하락 페널티 XP (<= 0). 정상 메시지는 0. 의존성 0(LLM/DB 호출 없음).
+
+    도배(플러딩)·멘션 폭주·과도한 대문자에 음수 페널티를 합산한다. 한글 등 대소문자가
+    없는 텍스트는 caps_ratio 0.0 이라 CAPS 페널티에서 자연 제외된다.
+    """
+    penalty = 0
+    if int(flood_count) > FLOOD_THRESHOLD:
+        penalty += PENALTY_FLOOD
+    if int(mention_count) >= MENTION_BURST_MIN:
+        penalty += PENALTY_MENTION_BURST
+    s = (text or "").strip()
+    if len(s) >= CAPS_MIN_LEN and float(caps_ratio) >= CAPS_RATIO_THRESHOLD:
+        penalty += PENALTY_CAPS
+    return penalty
 
 
 def level_step(level: int) -> int:

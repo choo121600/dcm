@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 
 import discord
 
-from .scoring import level, progress, utc_day, xp_award, xp_to_next
+from .scoring import caps_ratio, level, penalty_weight, progress, utc_day, xp_award, xp_to_next
 from .store import LevelingStore
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,11 @@ DEFAULT_TOP_N = 10
 SETTINGS_CACHE_TTL = 60.0  # per-guild 설정 캐시 수명(초, monotonic) — 변경은 이 시간 내 전파
 _EVICT_THRESHOLD = 5_000  # _last_award 가 이 크기를 넘으면 stale 엔트리 sweep
 _EVICT_MAX_AGE = 3_600.0  # 이보다 오래된 쿨다운 엔트리는 안전 제거(어떤 쿨다운도 지났음)
+# 신뢰-하락(decay) 핫패스 파라미터 (인메모리, 코드 기본값).
+FLOOD_WINDOW_SECONDS = 10.0  # 플러딩 카운트용 슬라이딩 윈도 길이(초)
+PENALTY_WINDOW_SECONDS = 60.0  # 페널티 빈도 cap 윈도 길이(초)
+PENALTY_WINDOW_CAP = 3  # 윈도 내 최대 페널티 횟수(오탐/게이밍 방지)
+PENALTY_DAILY_CAP = 20  # 일일 최대 페널티 횟수(UTC-day)
 _EMBED_COLOR = 0x5865F2  # Discord blurple
 # 신뢰 게이팅 쿼터 티어(코드 기본값): (최소 레벨, 일일 한도). 레벨에서 파생.
 WEB_QUOTA_TIERS = ((0, 20), (5, 50), (10, 100))
@@ -97,6 +103,10 @@ class LevelingService:
         self._last_award: dict[tuple[str, str], float] = {}
         # per-guild 설정 read-through 캐시: guild_id -> (fetched_monotonic, settings|None).
         self._settings_cache: dict[str, tuple[float, object]] = {}
+        # 신뢰-하락(decay) 인메모리 카운터 — 핫패스 DB read 0 유지(단일 event-loop 스레드 가정).
+        self._flood: dict[tuple[str, str], deque] = {}  # 메시지 timestamp 슬라이딩 윈도
+        self._penalty_window: dict[tuple[str, str], deque] = {}  # 페널티 timestamp 윈도(cap)
+        self._penalty_daily: dict[tuple[str, str, str], int] = {}  # (guild,user,utc_day)->횟수
 
     # --- per-guild 설정 (TTL 캐시 + 실패 시 기본값 degrade) ---
 
@@ -133,11 +143,35 @@ class LevelingService:
         except (TypeError, ValueError):
             return self._default_top_n
 
+    @staticmethod
+    def _decay_enabled(settings) -> bool:
+        en = getattr(settings, "leveling_decay_enabled", None) if settings is not None else None
+        return False if en is None else bool(en)  # 기본 OFF(보수적 출시)
+
+    @staticmethod
+    def _decay_shadow(settings) -> bool:
+        sh = getattr(settings, "leveling_decay_shadow", None) if settings is not None else None
+        return False if sh is None else bool(sh)  # 기본 enforce(decay 활성 시 실제 차감)
+
     def _maybe_evict(self, mono: float) -> None:
-        if len(self._last_award) < _EVICT_THRESHOLD:
+        if (
+            len(self._last_award) < _EVICT_THRESHOLD
+            and len(self._flood) < _EVICT_THRESHOLD
+            and len(self._penalty_window) < _EVICT_THRESHOLD
+            and len(self._penalty_daily) < _EVICT_THRESHOLD
+        ):
             return
         cutoff = mono - _EVICT_MAX_AGE
         self._last_award = {k: v for k, v in self._last_award.items() if v >= cutoff}
+        # decay 윈도 deque: 최근 활동이 stale 한 엔트리 제거.
+        self._flood = {k: dq for k, dq in self._flood.items() if dq and dq[-1] >= cutoff}
+        self._penalty_window = {
+            k: dq for k, dq in self._penalty_window.items() if dq and dq[-1] >= cutoff
+        }
+        # 일일 페널티 카운터: 오늘(최신 utc_day) 외 엔트리 제거.
+        if self._penalty_daily:
+            today = max(day for _, _, day in self._penalty_daily)
+            self._penalty_daily = {k: v for k, v in self._penalty_daily.items() if k[2] == today}
 
     # --- 핫패스 ---
 
@@ -149,6 +183,8 @@ class LevelingService:
         *,
         now: float | None = None,
         monotonic_time: float | None = None,
+        mention_count: int = 0,
+        is_admin: bool = False,
     ) -> bool:
         """비봇 메시지에 질-가중 XP 적립. 인메모리 쿨다운 1차 게이트 + 설정 TTL 캐시(핫패스 DB READ 0).
 
@@ -160,6 +196,23 @@ class LevelingService:
             if not self._enabled(settings):
                 return False
             key = (str(guild_id), str(user_id))
+            # 신뢰-하락: 플러딩 카운터는 쿨다운 게이트 前 갱신(인메모리, DB read 0).
+            if not is_admin and self._decay_enabled(settings):
+                flood_count = self._record_flood(key, mono)
+                self._maybe_evict(mono)  # 비적립 트래픽도 decay 맵 stale sweep 트리거
+                penalty = penalty_weight(text, flood_count, mention_count, caps_ratio(text))
+                if penalty < 0 and self._apply_penalty(
+                    guild_id,
+                    user_id,
+                    key,
+                    penalty,
+                    mono,
+                    now,
+                    settings,
+                    flood_count=flood_count,
+                    mention_count=mention_count,
+                ):
+                    return False  # 페널티가 실제 차감되면 이 메시지는 적립하지 않음
             last = self._last_award.get(key)
             if last is not None and mono - last < self._cooldown(settings):
                 return False
@@ -174,6 +227,72 @@ class LevelingService:
         except Exception:  # noqa: BLE001
             log.exception("leveling record_message failed (silent degrade)")
             return False
+
+    def _record_flood(self, key: tuple[str, str], mono: float) -> int:
+        """슬라이딩 윈도(FLOOD_WINDOW_SECONDS) 내 메시지 수 — 인메모리만(DB read 0)."""
+        dq = self._flood.get(key)
+        if dq is None:
+            dq = deque()
+            self._flood[key] = dq
+        dq.append(mono)
+        cutoff = mono - FLOOD_WINDOW_SECONDS
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        return len(dq)
+
+    def _apply_penalty(
+        self,
+        guild_id: int | str,
+        user_id: int | str,
+        key: tuple[str, str],
+        penalty: int,
+        mono: float,
+        now: float | None,
+        settings,
+        *,
+        flood_count: int,
+        mention_count: int,
+    ) -> bool:
+        """신뢰-하락 페널티 적용. 윈도/일일 cap·shadow 가드. 실제 차감 시 True(전량 audit).
+
+        반환 True = weighted_xp 를 실제 차감(이 메시지는 적립 skip). False = shadow/cap 으로 미차감.
+        DB read 0 — 인메모리 cap + fire-and-forget add_xp(write)만 사용.
+        """
+        pw = self._penalty_window.get(key)
+        if pw is None:
+            pw = deque()
+            self._penalty_window[key] = pw
+        cutoff = mono - PENALTY_WINDOW_SECONDS
+        while pw and pw[0] < cutoff:
+            pw.popleft()
+        if len(pw) >= PENALTY_WINDOW_CAP:
+            return False  # 윈도 cap 초과 — 추가 차감 안 함
+        wall = now if now is not None else time.time()
+        day = utc_day(wall)
+        dkey = (key[0], key[1], day)
+        if self._penalty_daily.get(dkey, 0) >= PENALTY_DAILY_CAP:
+            return False  # 일일 cap 초과
+        signals = f"flood={flood_count} mentions={mention_count}"
+        if self._decay_shadow(settings):
+            log.info(
+                "leveling decay SHADOW (would-penalize): guild=%s user=%s delta=%s %s",
+                key[0],
+                key[1],
+                penalty,
+                signals,
+            )
+            return False
+        pw.append(mono)
+        self._penalty_daily[dkey] = self._penalty_daily.get(dkey, 0) + 1
+        self._store.add_xp(guild_id, user_id, penalty, now=wall)
+        log.warning(
+            "leveling decay penalty: guild=%s user=%s delta=%s %s",
+            key[0],
+            key[1],
+            penalty,
+            signals,
+        )
+        return True
 
     # --- 신뢰 게이팅 (G003/G004): 레벨별 일일 한도 ---
 
