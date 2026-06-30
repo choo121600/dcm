@@ -571,8 +571,8 @@ class GuildAdminService:
                     risk=RISK_HIGH,
                 )
             return await self._execute_purge(guild_id, actor_name, actor_id, channels, plan)
-        if not plan.purge_channels and not plan.delete_roles:
-            return OpResult(True, "아카이브가 비어 있고 삭제할 고아 역할도 없어 ✅")
+        if not plan.purge_channels and not plan.delete_roles and not plan.orphan_categories:
+            return OpResult(True, "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅")
         token = make_confirmation_token()
         self._cleanup_cache[token] = "purge"
         return OpResult(
@@ -640,13 +640,25 @@ class GuildAdminService:
                 deleted_role.append(r.name)
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"역할 {r.name}: {exc}")
-        # 비워진 아카이브 카테고리 정리
+        deleted_cat = 0
+        # 비워진 아카이브 카테고리 + 고아(빈) 카테고리 정리
         for cid in find_archive_category_ids(channels):
             try:
                 await self._admin.delete_channel(guild_id, cid, reason=reason)
+                deleted_cat += 1
             except Exception:  # noqa: BLE001
                 pass
-        parts = [f"채널 {len(deleted_ch)}개 삭제", f"역할 {len(deleted_role)}개 삭제"]
+        for cat in plan.orphan_categories:
+            try:
+                await self._admin.delete_channel(guild_id, cat.id, reason=reason)
+                deleted_cat += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"카테고리 {cat.name}: {exc}")
+        parts = [
+            f"채널 {len(deleted_ch)}개 삭제",
+            f"역할 {len(deleted_role)}개 삭제",
+            f"빈 카테고리 {deleted_cat}개 삭제",
+        ]
         if failed:
             parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
         return OpResult(True, ("퍼지 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)

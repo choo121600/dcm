@@ -213,10 +213,11 @@ def test_service_archive_dryrun_then_confirm_moves_and_hides():
 
 
 def test_service_purge_dryrun_then_confirm_deletes():
-    """cleanup_purge: 아카이브 안 채널 + 고아 역할 삭제 + 빈 아카이브 카테고리 정리."""
+    """cleanup_purge: 아카이브 안 채널 + 고아 역할 + 빈/고아 카테고리 삭제."""
     chans = [
         _chan(50, "📦 아카이브", type=4),
         _chan(1, "archived", type=0, days_ago=300, parent_id=50),
+        _chan(52, "빈카테고리", type=4),  # 고아(빈) 카테고리
     ]
     admin = _FakeAdmin(chans, [_role(9, "orphan", member_count=0)])
     svc = GuildAdminService(admin, PendingConfirmations())
@@ -231,6 +232,7 @@ def test_service_purge_dryrun_then_confirm_deletes():
         assert res2.ok
         assert 1 in admin.deleted_channels  # 아카이브 안 채널 삭제
         assert 50 in admin.deleted_channels  # 비워진 아카이브 카테고리 삭제
+        assert 52 in admin.deleted_channels  # 고아(빈) 카테고리 삭제
         assert admin.deleted_roles == [9]
 
     asyncio.run(scenario())
@@ -286,3 +288,34 @@ def test_co_archiving_voice_makes_shared_role_orphan():
     plan = plan_cleanup(chans, [_role(9, "CHESS", member_count=0)], now_ms=NOW_MS, inactive_days=90)
     assert {c.name for c in plan.archive_channels} == {"chess-채팅", "CHESS-음성"}
     assert [r.name for r in plan.delete_roles] == ["CHESS"]
+
+
+# ── 단독 오래된 음성 + 고아(빈) 카테고리 ─────────────────────────────────
+def test_standalone_old_voice_is_archived_without_sibling():
+    """이름쌍이 없어도 음성-텍스트챗 마지막 활동이 오래되면(≥기준) 아카이브된다."""
+    chans = [_chan(1, "geeknews-radio", type=2, days_ago=300)]  # 텍스트 짝 없음, 오래된 음성
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.archive_channels] == ["geeknews-radio"]
+
+
+def test_no_text_voice_without_sibling_is_kept():
+    """텍스트 흔적도 짝도 없는 음성(일반 라운지)은 통화-전용 활성일 수 있어 유지."""
+    chans = [_chan(1, "라운지", type=2, days_ago=None)]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert plan.archive_channels == []
+
+
+def test_orphan_empty_category_detected():
+    chans = [
+        _chan(50, "빈카테고리", type=4),  # 자식 없음 → 고아
+        _chan(51, "활성카테고리", type=4),
+        _chan(1, "general", type=0, days_ago=1, parent_id=51),  # 자식 있음 → 유지
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.orphan_categories] == ["빈카테고리"]
+
+
+def test_archive_category_not_treated_as_orphan():
+    chans = [_chan(50, "📦 아카이브", type=4)]  # 빈 아카이브 카테고리지만 고아로 분류 안 함
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert plan.orphan_categories == []

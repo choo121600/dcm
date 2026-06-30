@@ -60,11 +60,14 @@ class CleanupPlan:
     archive_channels: list[ChannelAction] = field(default_factory=list)  # → 아카이브로 이동(되돌림 가능)
     purge_channels: list[ChannelAction] = field(default_factory=list)  # 이미 아카이브에 있음 → 삭제(영구)
     delete_roles: list[RoleAction] = field(default_factory=list)  # 고아 역할 → 삭제(영구)
+    orphan_categories: list[ChannelAction] = field(default_factory=list)  # 빈(고아) 카테고리 → 삭제(영구)
     skipped_protected: list[str] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not (self.archive_channels or self.purge_channels or self.delete_roles)
+        return not (
+            self.archive_channels or self.purge_channels or self.delete_roles or self.orphan_categories
+        )
 
     def _chan_line(self, c: ChannelAction) -> str:
         age = "메시지 없음" if c.age_days is None else f"{c.age_days:.0f}일 전"
@@ -88,6 +91,11 @@ class CleanupPlan:
             lines.append(f"  • @{r.name} ({r.reason})")
         if len(self.delete_roles) > 20:
             lines.append(f"  …외 {len(self.delete_roles) - 20}개")
+        lines.append(f"\n🗂️ 퍼지 때 삭제될 빈 카테고리: {len(self.orphan_categories)}개")
+        for c in self.orphan_categories[:20]:
+            lines.append(f"  • {c.name}")
+        if len(self.orphan_categories) > 20:
+            lines.append(f"  …외 {len(self.orphan_categories) - 20}개")
         lines.append("\n명령: /cleanup-archive (이동·되돌림 가능) → /cleanup-purge (영구 삭제)")
         return "\n".join(lines)
 
@@ -102,8 +110,8 @@ class CleanupPlan:
         return "\n".join(lines)
 
     def purge_summary(self) -> str:
-        if not self.purge_channels and not self.delete_roles:
-            return "아카이브가 비어 있고 삭제할 고아 역할도 없어 ✅"
+        if not self.purge_channels and not self.delete_roles and not self.orphan_categories:
+            return "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅"
         lines = ["🔥 영구 삭제 (되돌릴 수 없음):"]
         if self.purge_channels:
             lines.append(f"\n아카이브 채널 {len(self.purge_channels)}개:")
@@ -117,6 +125,12 @@ class CleanupPlan:
                 lines.append(f"  • @{r.name} ({r.reason})")
             if len(self.delete_roles) > 30:
                 lines.append(f"  …외 {len(self.delete_roles) - 30}개")
+        if self.orphan_categories:
+            lines.append(f"\n빈 카테고리 {len(self.orphan_categories)}개:")
+            for c in self.orphan_categories[:30]:
+                lines.append(f"  • {c.name}")
+            if len(self.orphan_categories) > 30:
+                lines.append(f"  …외 {len(self.orphan_categories) - 30}개")
         return "\n".join(lines)
 
 
@@ -193,9 +207,9 @@ def plan_cleanup(
         if a is None or a >= inactive_days:
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
-    # 음성/스테이지 동반 아카이브: 죽은 텍스트와 이름쌍(예: chess-engine-algo-채팅 ↔
-    # CHESS-ENGINE-ALGO-음성)이고 최근 활동이 없으면 함께 아카이브. 일반 음성 라운지(텍스트
-    # 짝 없음)는 건드리지 않는다(통화-전용 활성 라운지 오판 방지).
+    # 음성/스테이지도 아카이브: (1) 음성-텍스트챗 마지막 활동이 오래됨(≥기준), 또는 (2) 텍스트
+    # 흔적은 없지만 죽은 텍스트와 이름쌍(chess-engine-algo-채팅 ↔ CHESS-ENGINE-ALGO-음성).
+    # 텍스트 짝도 흔적도 없는 음성(일반 라운지)은 통화-전용 활성일 수 있어 건드리지 않는다.
     archived_text_bases = {_base_name(ca.name) for ca in plan.archive_channels}
     for c in channels:
         if int(c.get("type", -1)) not in CO_ARCHIVE_TYPES:
@@ -210,8 +224,7 @@ def plan_cleanup(
         a = age_days(c.get("last_message_id"), now_ms)
         if a is not None and a < inactive_days:
             continue  # 최근 음성-텍스트챗 활동 → 유지
-        base = _base_name(name)
-        if base and base in archived_text_bases:
+        if a is not None or (_base_name(name) in archived_text_bases):
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
     # 살아있는(아카이브/퍼지 대상이 아닌) 채널이 권한 오버라이트에 쓰는 역할은 보존.
@@ -240,5 +253,20 @@ def plan_cleanup(
             continue  # 살아있는 채널이 쓰는 역할은 보존
         reason = "멤버 0명·죽은 채널 전용" if rid in used_anywhere else "멤버 0명·미사용"
         plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), reason))
+
+    # 고아(빈) 카테고리: 자식 채널이 0인 카테고리. 아카이브 카테고리·보호 이름은 제외.
+    child_counts: dict[int, int] = {}
+    for c in channels:
+        p = c.get("parent_id")
+        if p:
+            child_counts[int(p)] = child_counts.get(int(p), 0) + 1
+    for c in channels:
+        if int(c.get("type", -1)) != 4:
+            continue
+        cid = int(c["id"])
+        if cid in archive_cat_ids or _is_protected(c.get("name", ""), protected_parts):
+            continue
+        if child_counts.get(cid, 0) == 0:
+            plan.orphan_categories.append(ChannelAction(cid, c.get("name", ""), None))
 
     return plan
