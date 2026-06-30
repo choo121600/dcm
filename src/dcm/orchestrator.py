@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 
 # Persona-voiced fallback when the LLM is unavailable (graceful degrade, DESIGN.md §12).
 _FALLBACK_REPLY = "음… 지금 잠깐 머리가 안 돌아가네 😅 좀 있다 다시 불러줘"
+# 신뢰 게이팅(G004): LLM 대화 일일 한도 초과 시 침묵 대신 '지우' 톤으로 격려+리셋 안내(soft-degrade).
+_LLM_QUOTA_REPLY = (
+    "오늘은 너랑 진짜 많이 떠들었네 ㅋㅋ 잠깐 충전하고 올게! 서버에서 더 활동하면 "
+    "신뢰 레벨이 올라서 나랑 더 얘기할 수 있어 😉 (한도는 매일 UTC 자정에 초기화돼)"
+)
 # 웹 검색 per-user 쿨다운 (비용 가드, ralplan S4): 30초 내 재검색 불가
 _WEB_COOLDOWN_SECONDS = 30.0
 
@@ -39,6 +44,7 @@ class Orchestrator:
         embedder: Embedder | None = None,
         retrieval_top_n: int = 6,
         router: object | None = None,
+        leveling=None,
     ) -> None:
         self._llm = llm
         self._bot_name = bot_name
@@ -49,6 +55,7 @@ class Orchestrator:
         self._embedder = embedder
         self._top_n = retrieval_top_n
         self._router = router
+        self._leveling = leveling  # LevelingService (신뢰 게이팅 G003/G004), 없으면 게이팅 비활성
         self._web_last: dict[str, float] = {}  # per-user 웹 검색 마지막 호출 시각
 
     def _self_block(self, store) -> str:
@@ -144,6 +151,16 @@ class Orchestrator:
                 return router_reply
 
 
+        # 신뢰 게이팅(G004): LLM 대화 일일 한도. command/router(특권) 단락 이후·페르소나 chat
+        # 직전에만 적용 — 특권/명령 경로는 절대 막지 않음(Non-Goal). 초과 시 침묵 대신 '지우' 톤
+        # 캔드 응답(더 활동·내일 UTC 리셋 안내)으로 soft-degrade.
+        if self._leveling is not None and incoming.guild_id:
+            allowed, _ = self._leveling.quota_check(
+                incoming.guild_id, incoming.author_id, "llm"
+            )
+            if not allowed:
+                return _LLM_QUOTA_REPLY
+
         recalled = await self._recall(text, incoming.author_id, gstore)
         memory_block = ""
         if recalled:
@@ -159,6 +176,14 @@ class Orchestrator:
         now_mono = time.monotonic()
         user_web_last = self._web_last.get(incoming.author_id, float("-inf"))
         use_web = now_mono - user_web_last >= _WEB_COOLDOWN_SECONDS
+        # 신뢰 게이팅(G003): 레벨별 일일 web 한도 초과 시 soft-degrade — 웹 없이 평소대로 LLM
+        # 답변(침묵/캔드 치환 아님). 멘션/대화 경로는 그대로 진행한다.
+        if use_web and self._leveling is not None and incoming.guild_id:
+            allowed, _ = self._leveling.quota_check(
+                incoming.guild_id, incoming.author_id, "web"
+            )
+            if not allowed:
+                use_web = False
         if use_web:
             self._web_last[incoming.author_id] = now_mono
 
@@ -172,6 +197,12 @@ class Orchestrator:
             log.exception("LLM completion failed")
             return _FALLBACK_REPLY
 
+        # web 실제 사용 시에만 일일 사용량 1 증가 (G003 신뢰 게이팅).
+        if web_used and self._leveling is not None and incoming.guild_id:
+            self._leveling.record_usage(incoming.guild_id, incoming.author_id, "web")
+        # LLM 페르소나 응답 1건을 일일 사용량에 반영 (G004 신뢰 게이팅).
+        if self._leveling is not None and incoming.guild_id:
+            self._leveling.record_usage(incoming.guild_id, incoming.author_id, "llm")
         # 격리: 웹 검색 파생 답변은 장기 메모리에 저장하지 않음 (ralplan S4, §14.5)
         if self._ingest and reply and not web_used:
             asyncio.create_task(self._safe_ingest(incoming, text, reply))

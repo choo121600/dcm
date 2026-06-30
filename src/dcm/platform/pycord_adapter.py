@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -83,6 +84,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._rl = policy.RateLimiter()  # additive burst-smoothing over pycord 429 handling (S6)
         self._onboarding = onboarding_policy  # OnboardingPolicy 인스턴스 (S6 온보딩)
         self._settings = guild_settings  # per-guild 설정/관리역할 (멀티길드 v2); None이면 env 시드값 폴백
+        self._public_commands: list[str] = []  # 비가드 멤버 공개 명령 registry (leveling 표시)
+        self._leveling = None  # LevelingService, register_leveling_commands 에서 주입
 
         intents = discord.Intents.default()
         # Privileged — must also be enabled in the Developer Portal (DESIGN.md §14.2).
@@ -117,6 +120,16 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         # DM(길드 없음) 전면 무시 — 멀티길드 격리상 guild_id 없는 경로는 fail-closed (P2 / G5).
         if message.guild is None:
             return
+
+        # 활동 레벨링: 모든 비봇 메시지에 XP 적립 (인메모리 쿨다운+설정 TTL 캐시 → steady-state DB read 0, 실패 침묵).
+        # _is_addressed 이전에 둬서 멘션이 아닌 일반 메시지도 집계한다 (P1).
+        if self._leveling is not None:
+            awarded = self._leveling.record_message(
+                message.guild.id, message.author.id, message.content or ""
+            )
+            if awarded:
+                # 적립 시(쿨다운 통과)에만 레벨→역할 무인 부여 시도(멱등·allow-list 가드, G004).
+                asyncio.create_task(self._safe_reconcile(message.author))
         # 호출 감지: @멘션 / 봇 메시지 reply / 메시지 이름 호명("썩스가재야 …", "안녕 썩스가재야").
         # 이름 호명은 스팸을 억제하면서 자연스러운 호명을 허용 (DESIGN.md §14.4; persona.md 예시).
         if not self._is_addressed(message):
@@ -529,6 +542,106 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             return wrapped
 
         return decorator
+
+    def public_command(self, name: str, description: str, **kwargs):
+        """Register a member-facing (public) slash command with NO authz guard.
+
+        Distinct from admin_command: registered globally so all members can invoke it,
+        NOT appended to _admin_commands, and NOT marked __gjc_admin_guarded__. Used only
+        for read-only leveling display (/rank, /leaderboard). authz invariant intact:
+        every privileged path still routes through admin_command; public commands are
+        intentionally unguarded reads of the caller's own / public leaderboard data."""
+
+        def decorator(func):
+            self._client.slash_command(name=name, description=description, **kwargs)(func)
+            self._public_commands.append(name)
+            return func
+
+        return decorator
+
+    def register_leveling_commands(self, leveling_service) -> None:
+        """Wire member-facing leveling display commands (/rank, /leaderboard) — public,
+        non-ephemeral, no admin guard so every member can view levels (스펙 f5/f9)."""
+        self._leveling = leveling_service
+
+        @self.public_command(name="rank", description="내 활동 레벨과 XP를 봅니다.")
+        async def rank(ctx):
+            gid = self._ctx_guild(ctx)
+            user = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+            display = getattr(user, "display_name", None) or str(getattr(user, "id", "?"))
+            embed = leveling_service.rank_embed(gid, getattr(user, "id", 0), display)
+            await ctx.respond(embed=embed)
+
+        @self.public_command(
+            name="leaderboard", description="서버 활동 리더보드 상위 순위를 봅니다."
+        )
+        async def leaderboard(ctx):
+            gid = self._ctx_guild(ctx)
+            guild = getattr(ctx, "guild", None)
+
+            def resolve(uid):
+                if guild is not None and hasattr(guild, "get_member"):
+                    member = guild.get_member(int(uid))
+                    if member is not None:
+                        return getattr(member, "display_name", None) or f"<@{uid}>"
+                return f"<@{uid}>"
+
+            embed = leveling_service.leaderboard_embed(gid, resolve)
+            await ctx.respond(embed=embed)
+
+        @self.admin_command(
+            name="set-level-role",
+            description="레벨 도달 시 자동 부여할 역할을 매핑합니다(관리자).",
+        )
+        async def set_level_role(
+            ctx,
+            level: discord.Option(int, "임계 레벨"),
+            role: discord.Option(discord.Role, "부여할 역할"),
+        ):
+            gid = self._ctx_guild(ctx)
+            guild = getattr(ctx, "guild", None)
+            ok, reason = leveling_service.validate_reward_role(role, guild)
+            if not ok:
+                await ctx.respond(
+                    f"그 역할은 자동부여로 안전하지 않아 거부했어 (사유: {reason}). "
+                    "권한 없는 장식용 역할을 골라줘.",
+                    ephemeral=True,
+                )
+                return
+            leveling_service.set_role_reward(gid, int(level), int(role.id))
+            await ctx.respond(
+                f"레벨 {int(level)} 도달 시 '{getattr(role, 'name', role.id)}' 역할을 자동으로 줄게.",
+                ephemeral=True,
+            )
+
+        @self.admin_command(
+            name="remove-level-role", description="레벨→역할 매핑을 제거합니다(관리자)."
+        )
+        async def remove_level_role(ctx, level: discord.Option(int, "임계 레벨")):
+            gid = self._ctx_guild(ctx)
+            leveling_service.remove_role_reward(gid, int(level))
+            await ctx.respond(f"레벨 {int(level)} 역할 매핑을 제거했어.", ephemeral=True)
+
+        @self.admin_command(
+            name="list-level-roles", description="레벨→역할 매핑 목록을 봅니다(관리자)."
+        )
+        async def list_level_roles(ctx):
+            gid = self._ctx_guild(ctx)
+            rewards = leveling_service.list_role_rewards(gid)
+            if not rewards:
+                await ctx.respond("아직 등록된 레벨→역할 매핑이 없어.", ephemeral=True)
+                return
+            lines = "\n".join(f"- 레벨 {lv} → <@&{rid}>" for lv, rid in rewards)
+            await ctx.respond(f"레벨→역할 매핑:\n{lines}", ephemeral=True)
+
+    async def _safe_reconcile(self, member) -> None:
+        """레벨→역할 무인 부여를 백그라운드로 안전 실행(예외 침묵 degrade)."""
+        if self._leveling is None:
+            return
+        try:
+            await self._leveling.reconcile_roles(member)
+        except Exception:  # noqa: BLE001
+            log.exception("leveling reconcile task failed")
 
     def register_admin_commands(self, service) -> None:
         """Wire the guild-management slash-command surface (ralplan S2+). Every command is

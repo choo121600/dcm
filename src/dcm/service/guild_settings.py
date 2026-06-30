@@ -13,18 +13,29 @@ from pathlib import Path
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
-  guild_id           TEXT PRIMARY KEY,
-  admin_role_id      INTEGER,
-  welcome_channel_id INTEGER,
-  default_role_id    INTEGER,
-  welcome_message    TEXT,
-  updated_at         REAL
+  guild_id                  TEXT PRIMARY KEY,
+  admin_role_id             INTEGER,
+  welcome_channel_id        INTEGER,
+  default_role_id           INTEGER,
+  welcome_message           TEXT,
+  leveling_enabled          INTEGER,
+  leveling_cooldown_seconds REAL,
+  leveling_top_n            INTEGER,
+  updated_at                REAL
 );
 """
 
 # _upsert 가 SQL 에 직접 끼워넣을 수 있는 컬럼 (외부 입력 아님 — 인젝션 방지 allowlist).
 _SETTABLE = frozenset(
-    {"admin_role_id", "welcome_channel_id", "default_role_id", "welcome_message"}
+    {
+        "admin_role_id",
+        "welcome_channel_id",
+        "default_role_id",
+        "welcome_message",
+        "leveling_enabled",
+        "leveling_cooldown_seconds",
+        "leveling_top_n",
+    }
 )
 
 
@@ -35,6 +46,9 @@ class GuildSettings:
     welcome_channel_id: int | None = None
     default_role_id: int | None = None
     welcome_message: str | None = None
+    leveling_enabled: bool | None = None  # None = 기본 활성(서비스 기본값 사용)
+    leveling_cooldown_seconds: float | None = None  # None = 서비스 기본(60s)
+    leveling_top_n: int | None = None  # None = 서비스 기본(10)
 
 
 class GuildSettingsStore:
@@ -46,8 +60,22 @@ class GuildSettingsStore:
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
         self._db.commit()
+        self._migrate()
         if seed is not None:
             self._seed(seed)
+
+    def _migrate(self) -> None:
+        # 기존 DB 에 leveling 컬럼이 없으면 추가(idempotent). CREATE TABLE IF NOT EXISTS 는 기존
+        # 테이블 컬럼을 바꾸지 않으므로 여기서 ALTER 한다(memory.store._migrate 와 동일 패턴).
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(guild_settings)")}
+        for col, ddl in (
+            ("leveling_enabled", "INTEGER"),
+            ("leveling_cooldown_seconds", "REAL"),
+            ("leveling_top_n", "INTEGER"),
+        ):
+            if col not in cols:
+                self._db.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {ddl}")
+        self._db.commit()
 
     def _seed(self, seed: GuildSettings) -> None:
         # 시드 길드 기본값을 1회만 (운영자가 이후 바꾼 값은 덮어쓰지 않음 — INSERT OR IGNORE).
@@ -77,6 +105,11 @@ class GuildSettingsStore:
             welcome_channel_id=row["welcome_channel_id"],
             default_role_id=row["default_role_id"],
             welcome_message=row["welcome_message"],
+            leveling_enabled=(
+                None if row["leveling_enabled"] is None else bool(row["leveling_enabled"])
+            ),
+            leveling_cooldown_seconds=row["leveling_cooldown_seconds"],
+            leveling_top_n=row["leveling_top_n"],
         )
 
     def _upsert(self, guild_id: int | str, field: str, value) -> None:
@@ -101,6 +134,15 @@ class GuildSettingsStore:
 
     def set_welcome_message(self, guild_id: int | str, message: str) -> None:
         self._upsert(guild_id, "welcome_message", str(message))
+
+    def set_leveling_enabled(self, guild_id: int | str, enabled: bool) -> None:
+        self._upsert(guild_id, "leveling_enabled", 1 if enabled else 0)
+
+    def set_leveling_cooldown_seconds(self, guild_id: int | str, seconds: float) -> None:
+        self._upsert(guild_id, "leveling_cooldown_seconds", float(seconds))
+
+    def set_leveling_top_n(self, guild_id: int | str, top_n: int) -> None:
+        self._upsert(guild_id, "leveling_top_n", int(top_n))
 
     def close(self) -> None:
         self._db.close()

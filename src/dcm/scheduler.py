@@ -34,6 +34,7 @@ class BackgroundJobs:
         forget_mode: str,
         reflect_min_episodics: int,
         ingest_model: str,
+        leveling_store=None,
     ) -> None:
         self._store = store
         self._llm = llm
@@ -46,6 +47,7 @@ class BackgroundJobs:
         self._forget_mode = forget_mode
         self._reflect_min_episodics = reflect_min_episodics
         self._ingest_model = ingest_model
+        self._leveling_store = leveling_store
         self._tasks: list[asyncio.Task] = []
 
     def start(self) -> None:
@@ -53,6 +55,12 @@ class BackgroundJobs:
             asyncio.create_task(self._loop("pruning", self._prune_interval, self._prune)),
             asyncio.create_task(self._loop("reflection", self._reflect_interval, self._reflect)),
         ]
+        if self._leveling_store is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._loop("daily-usage-prune", 86400, self._prune_daily_usage)
+                )
+            )
         log.info("background jobs started (prune/%.0fh, reflect/%.0fh)",
                  self._prune_interval / 3600, self._reflect_interval / 3600)
 
@@ -70,6 +78,12 @@ class BackgroundJobs:
                 break
             except Exception:
                 log.exception("%s job crashed; continuing", name)
+
+    async def _prune_daily_usage(self) -> None:
+        # 신뢰 게이팅(G003): 현재 UTC-day 미만의 daily_usage 행을 일일 정리(stale 위생).
+        from .leveling.scoring import utc_day
+
+        self._leveling_store.prune_daily_usage(utc_day(time.time()))
 
     async def _prune(self) -> None:
         # 멀티길드(P5): 길드별 핸들로만 가지치기 — 교차길드 미접근.

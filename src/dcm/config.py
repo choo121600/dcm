@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     dedup_threshold: float = 0.86  # cosine ≥ this → reinforce instead of duplicate (§5.3)
     subject_boost: float = 0.1
 
+    # Activity leveling (G001-G004) — 별도 leveling.db (memory.db 와 분리, 락 도메인 격리)
+    leveling_db: str = "data/leveling.db"
+
     # Background jobs (M3 forgetting / M4 growth) — DESIGN.md §7
     enable_background_jobs: bool = True
     prune_interval_hours: float = 24.0

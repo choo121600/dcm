@@ -10,6 +10,8 @@ from .llm import LLMClient, parse_credentials
 from .logging_setup import setup_logging
 from .memory.ingest import IngestionPipeline
 from .memory.store import MemoryStore
+from .leveling.service import LevelingService
+from .leveling.store import LevelingStore
 from .orchestrator import Orchestrator
 from .platform.pycord_adapter import PycordAdapter
 from .service.guild_admin import GuildAdminService
@@ -92,6 +94,11 @@ async def _run() -> None:
     admin_service = GuildAdminService(adapter, adapter.pending)
     adapter.register_admin_commands(admin_service)
 
+    # 활동 레벨링 (G001-G004): 별도 leveling.db + 단일 전용 writer(R1). guild_settings 로 per-guild 설정.
+    leveling_store = LevelingStore(settings.leveling_db)
+    leveling_service = LevelingService(leveling_store, guild_settings)
+    adapter.register_leveling_commands(leveling_service)
+
     # NL 라우터 (ralplan S3): 자연어 관리 명령을 닫힌 동사셋으로 라우팅.
     nl_router = NLRouter(
         llm=llm,
@@ -108,6 +115,7 @@ async def _run() -> None:
         embedder=embedder,
         retrieval_top_n=settings.retrieval_top_n,
         router=nl_router,
+        leveling=leveling_service,
     )
     adapter.on_mention(orchestrator.handle)
 
@@ -125,11 +133,16 @@ async def _run() -> None:
             forget_mode=settings.forget_mode,
             reflect_min_episodics=settings.reflect_min_episodics,
             ingest_model=settings.ingest_model,
+            leveling_store=leveling_store,
         )
         jobs.start()
 
     log.info("starting %s…", settings.bot_name)
-    await adapter.run()
+    try:
+        await adapter.run()
+    finally:
+        # R2: writer 그레이스풀 종료(큐 drain 후 close). daily_usage 유실=bounded fail-open.
+        leveling_store.close()
 
 
 def main() -> None:

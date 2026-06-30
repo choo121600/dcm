@@ -243,3 +243,32 @@ def test_adapter_no_settings_falls_back_to_env_admin_role():
     a = PycordAdapter(token="x", bot_name="지우", guild_id=123, admin_role_id=999)
     assert a._guild_admin_role(123) == 999
     assert a._guild_admin_role(456) == 999  # settings 없으면 모든 길드가 env 값
+
+
+# --- public leveling commands extend (not break) the by-construction contract ---
+
+def test_public_commands_unguarded_and_disjoint_from_admin(loop):
+    # /rank·/leaderboard 는 멤버 공개 비가드 명령. admin 명령과 분리(disjoint)되고
+    # 전체 등록 = admin ∪ public, admin 은 전부 guarded, public 은 전부 unguarded.
+    a = PycordAdapter(token="x", bot_name="지우", guild_id=123, admin_role_id=_ADMIN_ROLE_ID)
+    a.register_admin_commands(GuildAdminService(a, a.pending))
+
+    class _LevelingSvcStub:
+        def rank_embed(self, *args, **kw):
+            return None
+
+        def leaderboard_embed(self, *args, **kw):
+            return None
+
+    a.register_leveling_commands(_LevelingSvcStub())
+
+    all_names = {c.name for c in a._client.pending_application_commands}
+    assert all_names == set(a._admin_commands) | set(a._public_commands)
+    assert set(a._public_commands) == {"rank", "leaderboard"}
+    assert not (set(a._admin_commands) & set(a._public_commands))  # disjoint
+    for c in a._client.pending_application_commands:
+        guarded = getattr(c.callback, "__gjc_admin_guarded__", False)
+        if c.name in set(a._public_commands):
+            assert not guarded, f"{c.name} public command must NOT be admin-guarded"
+        else:
+            assert guarded, f"{c.name} admin command must be guarded by construction"
