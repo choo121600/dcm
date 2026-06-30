@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str
 
     # Identity
-    bot_name: str = "지우"
+    bot_name: str = "썩스가재"
     persona_file: str = "persona.md"
 
     # Server management (slash commands) — ralplan S1 / DESIGN.md §3.

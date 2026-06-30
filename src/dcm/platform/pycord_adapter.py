@@ -19,9 +19,9 @@ log = logging.getLogger(__name__)
 
 DISCORD_MAX = 2000
 
-# 봇 이름으로 호명할 때 붙는 한국어 호격 조사 (지우야/지우아/지우님/지우씨).
+# 봇 이름으로 호명할 때 붙는 한국어 호격 조사 (썩스가재야/썩스가재님/썩스가재씨).
 _VOCATIVE = "야아님씨"
-# 이름만으로 부를 때 이름 뒤에 올 수 있는 경계 문자 ("지우 안녕", "지우!", "지우?").
+# 이름만으로 부를 때 이름 뒤에 올 수 있는 경계 문자 ("썩스가재 안녕", "썩스가재!", "썩스가재?").
 _NAME_BOUNDARY = " \t\n\r!?.,~…:;"
 
 # 서버 템플릿 첨부 처리 (NL 경로): 허용 확장자 / 최대 크기 / 셋업 의도 키워드.
@@ -117,7 +117,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         # DM(길드 없음) 전면 무시 — 멀티길드 격리상 guild_id 없는 경로는 fail-closed (P2 / G5).
         if message.guild is None:
             return
-        # 호출 감지: @멘션 / 봇 메시지 reply / 메시지 이름 호명("지우야 …", "안녕 지우야").
+        # 호출 감지: @멘션 / 봇 메시지 reply / 메시지 이름 호명("썩스가재야 …", "안녕 썩스가재야").
         # 이름 호명은 스팸을 억제하면서 자연스러운 호명을 허용 (DESIGN.md §14.4; persona.md 예시).
         if not self._is_addressed(message):
             return
@@ -232,8 +232,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
     def _name_called(self, content: str) -> bool:
         """봇 이름으로 부르는 호명이면 True.
 
-        "지우"/"지우야"/"지우님 …"/"지우 안녕"/"안녕 지우야"는 매칭하고,
-        "지우가/지우는" 같은 3인칭 언급은 제외한다 (스팸 가드).
+        "썩스가재"/"썩스가재야"/"썩스가재님 …"/"썩스가재 안녕"/"안녕 썩스가재야"는 매칭하고,
+        "썩스가재가/썩스가재는" 같은 3인칭 언급은 제외한다 (스팸 가드).
         """
         name = (self._bot_name or "").strip()
         text = (content or "").strip()
@@ -244,7 +244,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             rest = text[len(name):]
             if rest == "" or rest[0] in _VOCATIVE or rest[0] in _NAME_BOUNDARY:
                 return True
-        # (b) 독립 토큰 "이름+호격조사"가 문장 어디에든("안녕 지우야").
+        # (b) 독립 토큰 "이름+호격조사"가 문장 어디에든("안녕 썩스가재야").
         idx = text.find(name)
         while idx != -1:
             before_ok = idx == 0 or text[idx - 1] in _NAME_BOUNDARY
@@ -292,7 +292,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         return any(w in low for w in _SETUP_INTENT_WORDS)
 
     async def _handle_template_attachment(self, message, attachment) -> None:
-        """'지우야 + 템플릿 첨부 + 세팅' NL 경로: 운영진/주인만 미리보기→확인버튼으로 적용.
+        """'썩스가재야 + 템플릿 첨부 + 세팅' NL 경로: 운영진/주인만 미리보기→확인버튼으로 적용.
 
         파일 내용은 오직 apply_template 파서로만 전달(데이터 전용) — 기억/페르소나에 들어가지 않음.
         공개 메시지의 확인 버튼은 클릭자 권한을 다시 검사한다.
@@ -426,7 +426,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         return header + body
 
     async def _handle_export(self, message) -> None:
-        """'지우야 서버 구조 yaml로 뽑아줘' NL 경로: 운영진/주인만 현재 구조를 YAML 파일로 회신."""
+        """'썩스가재야 서버 구조 yaml로 뽑아줘' NL 경로: 운영진/주인만 현재 구조를 YAML 파일로 회신."""
         if not self._is_admin(message):
             await self._send_to(
                 message.channel, "⛔ 서버 구조 내보내기는 운영진(관리자 역할)이나 서버 주인만 할 수 있어."

@@ -1,8 +1,8 @@
 # Discord Community Manager (dcm)
 
 A 24/7 Discord community-management bot — it manages the server (onboarding, roles,
-channels, moderation) and converses through a configurable persona (default **지우/Jiwoo**;
-mention it with `@지우` and it replies in character).
+channels, moderation) and converses through a configurable persona (default **썩스가재**;
+mention it with `@썩스가재` and it replies in character).
 Designed to **remember and grow** while **forgetting the trivial**, like a person.
 
 - Architecture & roadmap: [`DESIGN.md`](./DESIGN.md) (Korean guide: [`DESIGN.ko.md`](./DESIGN.ko.md))
@@ -39,7 +39,7 @@ chmod 600 .env     # keep secrets readable only by you (DESIGN.md §14.1)
 ```dotenv
 DISCORD_TOKEN=...            # from step 1
 ANTHROPIC_API_KEY=sk-ant-... # one key, or comma-separated for a key pool
-BOT_NAME=지우                # to rename: change this AND the bot's username in the portal
+BOT_NAME=썩스가재             # to rename: change this AND the bot's username in the portal
 ADMIN_GUILD_ID=...           # server (guild) id for admin slash-command registration (right-click server → Copy Server ID)
 ```
 
@@ -47,9 +47,9 @@ ADMIN_GUILD_ID=...           # server (guild) id for admin slash-command registr
 ```bash
 uv run dcm       # or: python -m dcm
 ```
-You should see `지우 online …` and a green status in Discord. Then in the server:
+You should see `썩스가재 online …` and a green status in Discord. Then in the server:
 ```
-@지우 안녕
+@썩스가재 안녕
 ```
 
 ## Running 24/7
@@ -79,7 +79,7 @@ categories:
       - { name: 회의, type: voice }
 ```
 
-For one-off changes you can also just ask in natural language (e.g. `지우야 2026-summer 카테고리 만들어줘`).
+For one-off changes you can also just ask in natural language (e.g. `썩스가재야 2026-summer 카테고리 만들어줘`).
 
 ## Tests
 Offline tests for the memory core and forgetting (no keys/network needed):
