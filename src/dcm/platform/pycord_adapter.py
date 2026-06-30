@@ -933,6 +933,46 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             ]
             await ctx.respond("\n".join(lines), ephemeral=True)
 
+        @self.admin_command(
+            name="cleanup-report", description="비활성 채널/고아 역할 정리 후보를 미리 본다(변경 없음)."
+        )
+        async def cleanup_report_cmd(ctx, days: int = 90):
+            gid = self._ctx_guild(ctx)
+            s = self._settings.get(gid) if self._settings else None
+            await self._run_op(
+                ctx,
+                lambda t: self._service.cleanup_report(
+                    guild_id=gid,
+                    inactive_days=days,
+                    admin_role_id=(int(s.admin_role_id or 0) if s else 0),
+                    welcome_channel_id=(int(s.welcome_channel_id or 0) if s else 0),
+                    protected_role_ids=self._reward_role_ids(gid),
+                ),
+                confirm=False,
+            )
+
+        @self.admin_command(
+            name="cleanup-inactive",
+            description="비활성 채널 보관 + 고아 역할 삭제(고위험; 확인 필요).",
+        )
+        async def cleanup_inactive_cmd(ctx, days: int = 90, confirm: bool = False):
+            gid, (an, aid) = self._ctx_guild(ctx), self._actor(ctx)
+            s = self._settings.get(gid) if self._settings else None
+            await self._run_op(
+                ctx,
+                lambda t: self._service.cleanup_inactive(
+                    guild_id=gid,
+                    actor_name=an,
+                    actor_id=aid,
+                    inactive_days=days,
+                    admin_role_id=(int(s.admin_role_id or 0) if s else 0),
+                    welcome_channel_id=(int(s.welcome_channel_id or 0) if s else 0),
+                    protected_role_ids=self._reward_role_ids(gid),
+                    confirm_token=t,
+                ),
+                confirm=confirm,
+            )
+
 
     # --- Command helpers (ralplan S3): actor/guild extraction + confirm-then-execute render ---
 
@@ -944,6 +984,15 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
     def _ctx_guild(self, ctx) -> int:
         gid = getattr(ctx, "guild_id", 0) or getattr(getattr(ctx, "guild", None), "id", 0)
         return int(gid or self._guild_id)
+
+    def _reward_role_ids(self, guild_id: int) -> set[int]:
+        """레벨 보상 역할 id 집합 — cleanup 이 보상 역할(멤버 0명이어도)을 고아로 삭제하지 않도록 보호."""
+        if self._leveling is None:
+            return set()
+        try:
+            return {int(rid) for _, rid in self._leveling.list_role_rewards(guild_id)}
+        except Exception:  # noqa: BLE001
+            return set()
 
     def _resolve_category(self, guild, category_id):
         """Resolve a category id to a channel object; raise if given-but-unresolved (ralplan S6:
@@ -1057,6 +1106,13 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         )
         return str(role.id)
 
+    async def delete_role(self, guild_id: int, role_id: int, *, reason: str) -> None:
+        await self._rl.acquire()
+        role = self._guild(guild_id).get_role(role_id)
+        if role is None:
+            raise RuntimeError(f"role {role_id} not found")
+        await role.delete(reason=reason)
+
     async def role_permissions(self, guild_id: int, role_id: int) -> int:
         role = self._guild(guild_id).get_role(role_id)
         if role is None:
@@ -1126,18 +1182,33 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         return len(deleted)
 
     async def list_roles(self, guild_id: int) -> list[dict]:
-        return [{"id": str(r.id), "name": r.name} for r in self._guild(guild_id).roles]
+        return [
+            {
+                "id": str(r.id),
+                "name": r.name,
+                "member_count": len(r.members),
+                "managed": bool(r.managed),
+                "is_default": r.is_default(),
+            }
+            for r in self._guild(guild_id).roles
+        ]
 
     async def list_channels(self, guild_id: int) -> list[dict]:
         out: list[dict] = []
         for ch in self._guild(guild_id).channels:
             parent = getattr(ch, "category_id", None)
+            lmid = getattr(ch, "last_message_id", None)
+            ow_roles = [
+                str(t.id) for t in getattr(ch, "overwrites", {}) if isinstance(t, discord.Role)
+            ]
             out.append(
                 {
                     "id": str(ch.id),
                     "name": ch.name,
                     "type": int(ch.type.value),
                     "parent_id": str(parent) if parent else None,
+                    "last_message_id": str(lmid) if lmid else None,
+                    "overwrite_role_ids": ow_roles,
                 }
             )
         return out

@@ -18,6 +18,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from .cleanup import DEFAULT_INACTIVE_DAYS, plan_cleanup
 
 if TYPE_CHECKING:  # annotation only — never import platform/base at runtime (keeps service discord-free)
     from ..platform.base import GuildAdmin
@@ -159,6 +160,8 @@ class GuildAdminService:
         self._pending = pending
         # confirm_token → 파싱된 ServerTemplate (드라이런에서 캐시 → confirm 시 실행). 단일 사용(pop).
         self._template_cache: dict = {}
+        # confirm_token → CleanupPlan (드라이런에서 캐시 → confirm 시 실행). 단일 사용(pop).
+        self._cleanup_cache: dict = {}
 
     def _gate(self, action: str, summary: str, *, role_permissions: int | None, confirm_token: str | None):
         """Confirmation gate for high-risk ops (ralplan S2/S6). Issue a single-use token when
@@ -467,6 +470,94 @@ class GuildAdminService:
         if not created:
             return OpResult(True, "템플릿 적용 완료 — 변경 없음(모두 이미 존재).", risk=RISK_HIGH)
         return OpResult(True, ("템플릿 적용 완료 ✅ — " + ", ".join(created))[:1900], risk=RISK_HIGH)
+
+    async def cleanup_report(
+        self, *, guild_id, inactive_days=DEFAULT_INACTIVE_DAYS, admin_role_id=0, welcome_channel_id=0, protected_role_ids=()
+    ) -> OpResult:
+        """읽기 전용: 비활성 채널 + 고아 역할 후보를 계산해 요약만 반환(변경 없음)."""
+        channels = await self._admin.list_channels(guild_id)
+        roles = await self._admin.list_roles(guild_id)
+        plan = plan_cleanup(
+            channels,
+            roles,
+            now_ms=time.time() * 1000,
+            inactive_days=inactive_days,
+            admin_role_id=admin_role_id,
+            welcome_channel_id=welcome_channel_id,
+            protected_role_ids=protected_role_ids,
+        )
+        return OpResult(True, plan.summary()[:1900])
+
+    async def cleanup_inactive(
+        self,
+        *,
+        guild_id,
+        actor_name,
+        actor_id,
+        inactive_days=DEFAULT_INACTIVE_DAYS,
+        admin_role_id=0,
+        welcome_channel_id=0,
+        protected_role_ids=(),
+        confirm_token=None,
+    ) -> OpResult:
+        """비활성 채널 보관(숨김) + 고아 역할 삭제 (고위험, 항상 confirm). 드라이런→토큰 캐시→실행."""
+        if confirm_token is not None:
+            plan = self._cleanup_cache.pop(confirm_token, None)
+            if plan is None:
+                return OpResult(
+                    False,
+                    "정리 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
+                    needs_confirmation=True,
+                    risk=RISK_HIGH,
+                )
+            return await self._execute_cleanup(guild_id, actor_name, actor_id, plan)
+        channels = await self._admin.list_channels(guild_id)
+        roles = await self._admin.list_roles(guild_id)
+        plan = plan_cleanup(
+            channels,
+            roles,
+            now_ms=time.time() * 1000,
+            inactive_days=inactive_days,
+            admin_role_id=admin_role_id,
+            welcome_channel_id=welcome_channel_id,
+            protected_role_ids=protected_role_ids,
+        )
+        if plan.empty:
+            return OpResult(True, "정리할 비활성 채널이나 고아 역할이 없어 ✅")
+        token = make_confirmation_token()
+        self._cleanup_cache[token] = plan
+        return OpResult(
+            False,
+            plan.summary()[:1900],
+            needs_confirmation=True,
+            confirmation_token=token,
+            risk=RISK_HIGH,
+        )
+
+    async def _execute_cleanup(self, guild_id, actor_name, actor_id, plan) -> OpResult:
+        reason = audit_reason(actor_name, actor_id, "cleanup inactive channels/roles")
+        archived: list[str] = []
+        deleted: list[str] = []
+        failed: list[str] = []
+        # 채널 보관 = @everyone(역할 id == 길드 id) 열람 차단으로 숨김 (되돌릴 수 있음)
+        for ch in plan.archive_channels:
+            try:
+                await self._admin.set_channel_role_overwrite(
+                    guild_id, ch.id, guild_id, view=False, reason=reason
+                )
+                archived.append(ch.name)
+            except Exception as exc:  # noqa: BLE001 - 부분 실패 보고, 자동 롤백 없음
+                failed.append(f"채널 {ch.name}: {exc}")
+        for r in plan.delete_roles:
+            try:
+                await self._admin.delete_role(guild_id, r.id, reason=reason)
+                deleted.append(r.name)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"역할 {r.name}: {exc}")
+        parts = [f"채널 {len(archived)}개 보관(숨김)", f"역할 {len(deleted)}개 삭제"]
+        if failed:
+            parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
+        return OpResult(True, ("정리 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
 
 
 class RateLimiter:

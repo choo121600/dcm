@@ -133,6 +133,8 @@ class GuildAdmin(Protocol):
 
     async def delete_channel(self, guild_id: int, channel_id: int, *, reason: str) -> None: ...
 
+    async def delete_role(self, guild_id: int, role_id: int, *, reason: str) -> None: ...
+
     async def create_role(
         self, guild_id: int, name: str, *, permissions: int = 0, reason: str
     ) -> str: ...
@@ -166,7 +168,9 @@ class GuildAdmin(Protocol):
         self, guild_id: int, channel_id: int, count: int, *, reason: str
     ) -> int: ...
 
-    # 읽기 전용 — 템플릿 적용의 멱등성/이름 해석에 사용 (audit reason 불필요).
+    # 읽기 전용 — 템플릿 멱등성/정리(cleanup) 계획에 사용 (audit reason 불필요).
+    # list_roles[]: id, name, member_count, managed, is_default
+    # list_channels[]: id, name, type, parent_id, last_message_id, overwrite_role_ids
     async def list_roles(self, guild_id: int) -> list[dict]: ...
 
     async def list_channels(self, guild_id: int) -> list[dict]: ...
