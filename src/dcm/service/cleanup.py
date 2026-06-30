@@ -207,10 +207,18 @@ def plan_cleanup(
         if a is None or a >= inactive_days:
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
-    # 음성/스테이지도 아카이브: (1) 음성-텍스트챗 마지막 활동이 오래됨(≥기준), 또는 (2) 텍스트
-    # 흔적은 없지만 죽은 텍스트와 이름쌍(chess-engine-algo-채팅 ↔ CHESS-ENGINE-ALGO-음성).
-    # 텍스트 짝도 흔적도 없는 음성(일반 라운지)은 통화-전용 활성일 수 있어 건드리지 않는다.
+    # 음성/스테이지도 아카이브 — 최근(<기준) 활동만 아니면: (1) 음성-텍스트챗이 오래됨,
+    # (2) 죽은 텍스트와 이름쌍, 또는 (3) 최근 활동 채널이 하나도 없는 '죽은 카테고리'에 속함
+    # (텍스트 없는 토픽 라운지 포함). 활성 채널이 있는 카테고리의 텍스트-없는 음성은 보존.
     archived_text_bases = {_base_name(ca.name) for ca in plan.archive_channels}
+    active_categories: set[int] = set()
+    for c in channels:
+        p = c.get("parent_id")
+        if not p:
+            continue
+        a = age_days(c.get("last_message_id"), now_ms)
+        if a is not None and a < inactive_days:
+            active_categories.add(int(p))
     for c in channels:
         if int(c.get("type", -1)) not in CO_ARCHIVE_TYPES:
             continue
@@ -224,7 +232,11 @@ def plan_cleanup(
         a = age_days(c.get("last_message_id"), now_ms)
         if a is not None and a < inactive_days:
             continue  # 최근 음성-텍스트챗 활동 → 유지
-        if a is not None or (_base_name(name) in archived_text_bases):
+        if (
+            a is not None
+            or _base_name(name) in archived_text_bases
+            or (parent and int(parent) not in active_categories)
+        ):
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
     # 살아있는(아카이브/퍼지 대상이 아닌) 채널이 권한 오버라이트에 쓰는 역할은 보존.

@@ -319,3 +319,25 @@ def test_archive_category_not_treated_as_orphan():
     chans = [_chan(50, "📦 아카이브", type=4)]  # 빈 아카이브 카테고리지만 고아로 분류 안 함
     plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
     assert plan.orphan_categories == []
+
+
+def test_notext_voice_in_dead_category_is_archived():
+    """텍스트 흔적 없는 음성이라도 '최근 활동 채널이 없는' 카테고리(예: 토픽 라운지)면 아카이브."""
+    chans = [
+        _chan(50, "PYTHON", type=4),
+        _chan(1, "라운지", type=2, days_ago=None, parent_id=50),
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.archive_channels] == ["라운지"]
+
+
+def test_notext_voice_in_active_category_is_kept():
+    """카테고리에 최근 활동 채널이 있으면 같은 카테고리의 텍스트-없는 음성은 보존."""
+    chans = [
+        _chan(50, "📞음성 채널", type=4),
+        _chan(1, "모각코", type=2, days_ago=2, parent_id=50),  # 최근 활동
+        _chan(2, "스터디룸2", type=2, days_ago=None, parent_id=50),  # 텍스트 없음
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    names = {c.name for c in plan.archive_channels}
+    assert "스터디룸2" not in names and "모각코" not in names
