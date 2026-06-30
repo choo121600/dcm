@@ -239,16 +239,16 @@ def plan_cleanup(
         ):
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
-    # 살아있는(아카이브/퍼지 대상이 아닌) 채널이 권한 오버라이트에 쓰는 역할은 보존.
+    # 역할 분류: 살아있는 채널이 쓰는 역할은 보존. 죽은(아카이브/퍼지) 채널 '전용' 역할은 멤버가
+    # 남아 있어도 채널이 사라지면 무용이라 정리. 채널과 무관한 정체성 역할(어디에도 미사용 +
+    # 멤버 보유)은 보존(관심사/기수/색상 등).
     moving_or_purging = {ca.id for ca in plan.archive_channels} | {cp.id for cp in plan.purge_channels}
     live_role_refs: set[int] = set()
-    used_anywhere: set[int] = set()
+    dead_role_refs: set[int] = set()
     for c in channels:
         cid = int(c["id"])
         for rid in c.get("overwrite_role_ids") or []:
-            used_anywhere.add(int(rid))
-            if cid not in moving_or_purging:
-                live_role_refs.add(int(rid))
+            (dead_role_refs if cid in moving_or_purging else live_role_refs).add(int(rid))
 
     protected_ids = {int(x) for x in (protected_role_ids or ())}
     for r in roles:
@@ -258,13 +258,18 @@ def plan_cleanup(
         if admin_role_id and rid == int(admin_role_id):
             continue
         if rid in protected_ids:
-            continue  # 외부 보호 역할(예: 레벨 보상) — 멤버 0명이어도 삭제 금지
-        if int(r.get("member_count", 0)) != 0:
-            continue
+            continue  # 외부 보호 역할(예: 레벨 보상)
         if rid in live_role_refs:
             continue  # 살아있는 채널이 쓰는 역할은 보존
-        reason = "멤버 0명·죽은 채널 전용" if rid in used_anywhere else "멤버 0명·미사용"
-        plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), reason))
+        mc = int(r.get("member_count", 0))
+        if rid in dead_role_refs:
+            # 죽은 채널 전용 역할 — 멤버가 있어도 정리(채널이 사라져 무용). 멤버 수 표기.
+            reason = f"죽은 채널 전용·멤버 {mc}명"
+            plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), reason))
+        elif mc == 0:
+            # 어떤 채널에도 안 쓰이고 멤버도 0 → 고아
+            plan.delete_roles.append(RoleAction(rid, r.get("name", str(rid)), "멤버 0명·미사용"))
+        # else: 채널 미사용 + 멤버 보유 → 정체성/관심사 역할로 간주, 보존
 
     # 고아(빈) 카테고리: 자식 채널이 0인 카테고리. 아카이브 카테고리·보호 이름은 제외.
     child_counts: dict[int, int] = {}

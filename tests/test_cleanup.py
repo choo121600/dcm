@@ -116,8 +116,22 @@ def test_role_used_by_live_channel_is_kept():
 def test_role_used_only_by_archived_channel_is_deleted():
     chans = [_chan(1, "dead", days_ago=300, overwrite_role_ids=[9])]
     plan = plan_cleanup(chans, [_role(9, "chess", member_count=0)], now_ms=NOW_MS, inactive_days=90)
-    assert [(r.name, r.reason) for r in plan.delete_roles] == [("chess", "멤버 0명·죽은 채널 전용")]
+    assert [(r.name, r.reason) for r in plan.delete_roles] == [("chess", "죽은 채널 전용·멤버 0명")]
     assert [c.name for c in plan.archive_channels] == ["dead"]
+
+
+def test_dead_channel_role_with_members_is_deleted():
+    """죽은 채널 전용 역할은 멤버가 남아 있어도 정리 대상(채널이 사라지면 무용)."""
+    chans = [_chan(1, "django-채팅", type=0, days_ago=300, overwrite_role_ids=[9])]
+    plan = plan_cleanup(chans, [_role(9, "DJANGO", member_count=6)], now_ms=NOW_MS, inactive_days=90)
+    assert [r.name for r in plan.delete_roles] == ["DJANGO"]
+    assert "멤버 6명" in plan.delete_roles[0].reason
+
+
+def test_identity_role_with_members_unused_is_kept():
+    """채널과 무관한 정체성/관심사 역할(멤버 보유 + 어디에도 미사용)은 보존."""
+    plan = plan_cleanup([], [_role(9, "PYTHON", member_count=24)], now_ms=NOW_MS, inactive_days=90)
+    assert plan.delete_roles == []
 
 
 # ── summary / empty ─────────────────────────────────────────────────────
