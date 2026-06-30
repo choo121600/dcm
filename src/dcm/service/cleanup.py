@@ -8,7 +8,9 @@
 
 설계 결정(사용자 합의):
 - 비활성 기준 = 마지막 메시지 경과일 ≥ N일(기본 90). 메시지 없는 채널도 비활성으로 본다.
-- 아카이브 대상은 텍스트 채널(type 0)만. 포럼(15)/공지(5)/음성(2)/카테고리(4)/스테이지(13) 제외.
+- 아카이브 1차 대상은 텍스트 채널(type 0). 음성(2)/스테이지(13)는 죽은 텍스트와 '이름쌍'
+  (예: chess-engine-algo-채팅 ↔ CHESS-ENGINE-ALGO-음성)일 때 동반 아카이브 — 텍스트 짝이
+  없는 일반 음성 라운지는 통화-전용 활성일 수 있어 건드리지 않는다. 포럼(15)/공지(5) 제외.
 - 이미 '📦 아카이브' 안에 있는 채널은 퍼지(삭제) 대상으로 분류(다시 아카이브하지 않음).
 - 역할은 멤버 0명 + 봇/연동 아님 + @everyone/관리역할/보호역할 아님 + 살아있는(아카이브/퍼지
   대상이 아닌) 채널이 안 쓰는 것만 삭제 후보. 역할 삭제는 퍼지 단계에서만 일어난다.
@@ -26,6 +28,9 @@ MAX_CHANNELS_PER_CATEGORY = 50
 
 # 아카이브 후보로 고려하는 채널 타입: 텍스트만.
 ARCHIVABLE_TYPES = frozenset({0})
+
+# 동반 아카이브 타입: 음성(2)/스테이지(13). 죽은 텍스트와 '이름쌍'일 때만 함께 아카이브한다.
+CO_ARCHIVE_TYPES = frozenset({2, 13})
 
 # 아카이브에서 항상 제외할 채널 이름 조각(운영/안내/입구 등). 대소문자 무시 부분일치 — 드라이런에서
 # 운영자가 최종 검토하므로 보수적으로 넓게 잡는다.
@@ -128,6 +133,16 @@ def _is_protected(name: str, protected_parts) -> bool:
     return any(p.lower() in low for p in protected_parts)
 
 
+def _base_name(name: str) -> str:
+    """채널 이름에서 종류 접미사(음성/voice/채팅/chat/채널)를 떼고 소문자화 — 텍스트↔음성 이름쌍 매칭용."""
+    s = (name or "").lower().strip()
+    for suf in ("-음성", " 음성", "음성", "-voice", "voice", "-채팅", " 채팅", "채팅", "-chat", "chat", "-채널", "채널"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    return s.strip(" -_·")
+
+
 def find_archive_category_ids(channels: list[dict]) -> set[int]:
     """'📦 아카이브'(및 분할본) 카테고리의 id 집합."""
     return {
@@ -176,6 +191,27 @@ def plan_cleanup(
             continue
         a = age_days(c.get("last_message_id"), now_ms)
         if a is None or a >= inactive_days:
+            plan.archive_channels.append(ChannelAction(cid, name, a))
+
+    # 음성/스테이지 동반 아카이브: 죽은 텍스트와 이름쌍(예: chess-engine-algo-채팅 ↔
+    # CHESS-ENGINE-ALGO-음성)이고 최근 활동이 없으면 함께 아카이브. 일반 음성 라운지(텍스트
+    # 짝 없음)는 건드리지 않는다(통화-전용 활성 라운지 오판 방지).
+    archived_text_bases = {_base_name(ca.name) for ca in plan.archive_channels}
+    for c in channels:
+        if int(c.get("type", -1)) not in CO_ARCHIVE_TYPES:
+            continue
+        cid = int(c["id"])
+        parent = c.get("parent_id")
+        if parent and int(parent) in archive_cat_ids:
+            continue
+        name = c.get("name", "")
+        if _is_protected(name, protected_parts):
+            continue
+        a = age_days(c.get("last_message_id"), now_ms)
+        if a is not None and a < inactive_days:
+            continue  # 최근 음성-텍스트챗 활동 → 유지
+        base = _base_name(name)
+        if base and base in archived_text_bases:
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
     # 살아있는(아카이브/퍼지 대상이 아닌) 채널이 권한 오버라이트에 쓰는 역할은 보존.

@@ -244,3 +244,45 @@ def test_service_cleanup_report_is_readonly():
     assert res.ok and not res.needs_confirmation
     assert admin.moved == [] and admin.deleted_channels == [] and admin.deleted_roles == []
     assert "#dead" in res.detail and "@orphan" in res.detail
+
+
+# ── 음성 동반 아카이브(이름쌍) ───────────────────────────────────────────
+def test_voice_co_archived_with_dead_text_sibling():
+    """죽은 텍스트와 이름쌍인 음성(텍스트 없어도)은 함께 아카이브된다."""
+    chans = [
+        _chan(1, "chess-engine-algo-채팅", type=0, days_ago=300),
+        _chan(2, "CHESS-ENGINE-ALGO-음성", type=2, days_ago=None),
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert {c.name for c in plan.archive_channels} == {"chess-engine-algo-채팅", "CHESS-ENGINE-ALGO-음성"}
+
+
+def test_voice_lounge_without_text_sibling_is_kept():
+    """텍스트 짝이 없는 일반 음성(라운지)은 통화-전용 활성일 수 있어 건드리지 않는다."""
+    chans = [
+        _chan(1, "django-채팅", type=0, days_ago=300),
+        _chan(2, "라운지", type=2, days_ago=None),
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.archive_channels] == ["django-채팅"]
+
+
+def test_voice_with_recent_activity_is_kept_even_with_sibling():
+    """음성-텍스트챗에 최근 활동이 있으면 죽은 텍스트 짝이 있어도 유지."""
+    chans = [
+        _chan(1, "django-채팅", type=0, days_ago=300),
+        _chan(2, "DJANGO-음성", type=2, days_ago=5),
+    ]
+    plan = plan_cleanup(chans, [], now_ms=NOW_MS, inactive_days=90)
+    assert [c.name for c in plan.archive_channels] == ["django-채팅"]
+
+
+def test_co_archiving_voice_makes_shared_role_orphan():
+    """죽은 텍스트+음성에서만 쓰이는 역할은 둘 다 아카이브되면 고아(삭제 후보)가 된다."""
+    chans = [
+        _chan(1, "chess-채팅", type=0, days_ago=300, overwrite_role_ids=[9]),
+        _chan(2, "CHESS-음성", type=2, days_ago=None, overwrite_role_ids=[9]),
+    ]
+    plan = plan_cleanup(chans, [_role(9, "CHESS", member_count=0)], now_ms=NOW_MS, inactive_days=90)
+    assert {c.name for c in plan.archive_channels} == {"chess-채팅", "CHESS-음성"}
+    assert [r.name for r in plan.delete_roles] == ["CHESS"]
