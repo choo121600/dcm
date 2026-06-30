@@ -232,3 +232,38 @@ def test_legit_message_with_no_marker_not_penalized_even_when_danger_on():
             assert store.get_record("1", "42")[0] >= 300  # 마커 없으면 무차감(+적립 가능)
         finally:
             store.close()
+
+
+# ── 온보딩 역할 footgun 차단 (architect MEDIUM) ──────────────────────
+
+
+def test_revoke_skips_onboarding_default_role_even_if_mapped():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _svc(tmp, leveling_decay_enabled=True, default_role_id=100)
+        try:
+            store.set_role_reward("1", 5, 100)  # 온보딩 역할(100)을 실수로 보상에 매핑
+            store.add_xp("1", "42", 0, now=1.0)  # 레벨 0 (< 5-1)
+            onboarding = _role(role_id=100, position=1)
+            member = _member({100: onboarding}, roles=[onboarding])
+            asyncio.run(svc.reconcile_roles(member))
+            member.remove_roles.assert_not_awaited()  # 온보딩 역할은 자동 회수 안 함(채널 접근 보존)
+        finally:
+            store.close()
+
+
+def test_validate_reward_role_rejects_onboarding_role():
+    with tempfile.TemporaryDirectory() as tmp:
+        svc, store = _svc(tmp, default_role_id=100)
+        try:
+            guild = types.SimpleNamespace(
+                id="1",
+                me=types.SimpleNamespace(top_role=types.SimpleNamespace(position=10)),
+                default_role=None,
+            )
+            ok, reason = svc.validate_reward_role(_role(role_id=100, position=1), guild)
+            assert ok is False
+            assert reason == "onboarding-role"  # 온보딩 역할 보상 매핑 거부
+            ok2, _ = svc.validate_reward_role(_role(role_id=200, position=1), guild)
+            assert ok2 is True  # 비온보딩 안전 역할은 통과
+        finally:
+            store.close()

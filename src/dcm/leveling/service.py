@@ -436,6 +436,7 @@ class LevelingService:
             bot_member = getattr(guild, "me", None)
             bot_top = getattr(getattr(bot_member, "top_role", None), "position", None)
             member_roles = getattr(member, "roles", []) or []
+            onboarding_id = self._onboarding_role_id(guild.id)
             for reward_level, role_id in rewards:
                 role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
                 if role is None:
@@ -470,6 +471,8 @@ class LevelingService:
                 elif lvl < reward_level - LEVEL_ROLE_HYSTERESIS and has_role:
                     # 회수(revoke, P2): 신뢰 하락으로 임계 미달 → 봇이 부여 가능한 보상 역할만 회수.
                     # _role_grant_ok 미통과(managed/everyone/위계/위험권한) 역할은 보존(자동 미회수).
+                    if onboarding_id is not None and role_id == onboarding_id:
+                        continue  # 온보딩 역할은 보상 매핑돼 있어도 절대 자동 회수 안 함(채널 접근 보존)
                     ok, _reason = self._role_grant_ok(role, guild, bot_top)
                     if not ok:
                         continue
@@ -491,8 +494,20 @@ class LevelingService:
 
     # --- 역할 보상 설정 (admin) ---
 
+    def _onboarding_role_id(self, guild_id) -> int | None:
+        """길드의 온보딩(가입 시 부여) default_role_id — 회수/보상 후보에서 제외하기 위함."""
+        settings = self._cached_settings(guild_id, time.monotonic())
+        rid = getattr(settings, "default_role_id", None) if settings is not None else None
+        try:
+            return int(rid) if rid else None
+        except (TypeError, ValueError):
+            return None
+
     def validate_reward_role(self, role, guild) -> tuple[bool, str]:
-        """설정 시점 allow-list 사전검증(부여 시점과 동일 가드)."""
+        """설정 시점 allow-list 사전검증(부여 시점 가드 + 온보딩 역할 거부)."""
+        onboarding_id = self._onboarding_role_id(getattr(guild, "id", None))
+        if onboarding_id is not None and getattr(role, "id", None) == onboarding_id:
+            return (False, "onboarding-role")  # 온보딩 역할을 보상으로 매핑 금지(자동 회수 footgun)
         bot_member = getattr(guild, "me", None)
         bot_top = getattr(getattr(bot_member, "top_role", None), "position", None)
         return self._role_grant_ok(role, guild, bot_top)
