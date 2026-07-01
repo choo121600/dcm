@@ -1,17 +1,24 @@
 # Discord Community Manager (dcm)
 
+[![CI](https://github.com/choo121600/dcm/actions/workflows/ci.yml/badge.svg)](https://github.com/choo121600/dcm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](./CODE_OF_CONDUCT.md)
+
+**English** · [한국어](./README.ko.md)
+
 A 24/7 Discord community-management bot — it manages the server (onboarding, roles,
 channels, moderation) and converses through a configurable persona (default **썩스가재**;
 mention it with `@썩스가재` and it replies in character).
 Designed to **remember and grow** while **forgetting the trivial**, like a person.
 
-- Architecture & roadmap: [`DESIGN.md`](./DESIGN.md) (Korean guide: [`DESIGN.ko.md`](./DESIGN.ko.md))
+- Architecture & roadmap: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (한국어: [`ARCHITECTURE.ko.md`](./ARCHITECTURE.ko.md))
 - Persona: [`persona.md`](./persona.md)
-- Korean version of this README: [`README.ko.md`](./README.ko.md)
+- Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md) · Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 
 > **Status:** M1–M4 implemented — the bot talks, remembers (importance-weighted recall), forgets
 > (time decay + pruning, plus a `잊어줘` command), and grows (reflection → semantic/self memory).
-> M5 polish is partial. See DESIGN.md §11 for the roadmap.
+> M5 polish is partial. See ARCHITECTURE.md §11 for the roadmap.
 
 ## Setup
 
@@ -22,7 +29,7 @@ Designed to **remember and grow** while **forgetting the trivial**, like a perso
    Without it the bot can't read message text and won't respond. This is the most common setup mistake.
 4. **OAuth2 → URL Generator**:
    - **Chat-only:** scope `bot`; permissions **View Channels**, **Send Messages**, **Read Message History**.
-   - **With server management:** also add scope `applications.commands` and permissions **Manage Channels** + **Manage Roles**. **Never grant Administrator** (least privilege — DESIGN.md §14.6–§14.7). Drag the bot's role *above* the roles it should manage.
+   - **With server management:** also add scope `applications.commands` and permissions **Manage Channels** + **Manage Roles**. **Never grant Administrator** (least privilege — ARCHITECTURE.md §14.6–§14.7). Drag the bot's role *above* the roles it should manage.
    Open the generated URL to invite the bot. Server-management slash commands are **admin-only** (callers must hold **Manage Guild**) and register to `ADMIN_GUILD_ID`.
 
 ### 2. Install
@@ -32,7 +39,7 @@ Requires Python 3.11+.
 git clone <repo> dcm && cd dcm
 uv sync            # or: pip install -e .
 cp .env.example .env
-chmod 600 .env     # keep secrets readable only by you (DESIGN.md §14.1)
+chmod 600 .env     # keep secrets readable only by you (ARCHITECTURE.md §14.1)
 ```
 
 ### 3. Configure `.env`
@@ -91,4 +98,24 @@ PYTHONPATH=src python tests/test_forgetting.py
 ## Security notes
 - `.env` is git-ignored — never commit real secrets. Keys are never written to logs.
 - The bot makes outbound connections only (no inbound ports / web server).
-- Invite it only to the channels it needs. See DESIGN.md §14 for the full security model.
+- Invite it only to the channels it needs. See ARCHITECTURE.md §14 for the full security model.
+
+## Localization
+The bot's language is configurable. User-facing strings live in `src/dcm/i18n/locales/`
+(`en.yaml`, `ko.yaml`, plus per-namespace fragments under `en/` and `ko/`); pick one with
+`BOT_LOCALE` (default `ko`). To add a language, copy a locale's files, translate the values, and
+set `BOT_LOCALE` to its code. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §10 for the design.
+
+## Customization
+A few things are intentionally deployment-specific — swap them for your own community:
+- **`persona.md`** — the bot's character (its example lines are in the persona's language).
+- **`knowledge.md`** — static server/community knowledge injected into the prompt (`KNOWLEDGE_FILE`).
+- The study-name lookup in `src/dcm/service/study_lookup.py` is tailored to one community's data.
+
+## Contributing
+Contributions are welcome! See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup, the
+checks we run (`pytest` + `ruff`), and project conventions. Please also read our
+[Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## License
+[MIT](./LICENSE) © Yeonguk

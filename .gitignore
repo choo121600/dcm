@@ -1,4 +1,4 @@
-# Secrets — never commit (DESIGN.md §14.1)
+# Secrets — never commit (ARCHITECTURE.md §14.1)
 .env
 *.env
 !.env.example

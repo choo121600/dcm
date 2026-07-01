@@ -1,13 +1,26 @@
 # AGENTS.md
 
-이 저장소에서 작업하는 모든 에이전트(Claude 등)가 따라야 하는 규칙.
+Rules every agent (Claude, etc.) working in this repository must follow.
 
-## Git / 커밋
+## Git / commits
 
-- 커밋의 author/committer는 **계정 주인 본인(Yeonguk <choo121600@gmail.com>)만** 사용한다.
-  Claude 등 에이전트를 작성자로 넣지 않는다.
-- 커밋 메시지와 PR 본문에 에이전트를 co-author로 넣지 않는다.
-  구체적으로 다음을 **절대 추가하지 않는다**:
-  - `Co-Authored-By: Claude ...` 트레일러
-  - `Claude-Session: ...` 트레일러
-  - PR 본문의 "🤖 Generated with Claude Code" 류 문구
+- The commit author/committer must be **the account owner only (Yeonguk <choo121600@gmail.com>)**.
+  Do not list Claude or any other agent as the author.
+- Do not add any agent as a co-author of a commit message or PR body.
+  Specifically, **never add**:
+  - a `Co-Authored-By: Claude ...` trailer
+  - a `Claude-Session: ...` trailer
+  - "🤖 Generated with Claude Code"-style phrasing in a PR body
+
+## Language & docs
+
+- Documentation and code comments are written in **English** (global-standard, English-primary).
+- Korean translations live in `*.ko.md` sibling files (e.g. `README.ko.md`). Keep them in sync when
+  you change the English source.
+- The bot's **runtime voice** is intentionally localizable. User-facing strings live in
+  `src/dcm/i18n/locales/{en,ko}.yaml`, not inline in source. Add new user-facing text as an i18n
+  key in **both** locales rather than hard-coding a string.
+
+## Before you commit
+
+- Run the test suite and linter: `pytest -q` and `ruff check .` (see `CONTRIBUTING.md`).
