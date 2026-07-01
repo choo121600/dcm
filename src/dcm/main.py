@@ -114,6 +114,7 @@ async def _run() -> None:
     nl_router = NLRouter(
         llm=llm,
         service=admin_service,
+        dispatch_model=settings.ingest_model,  # 분류는 값싼 haiku로 (매 멘션 경로, 비용 절감)
     )
 
     orchestrator = Orchestrator(

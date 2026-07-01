@@ -53,7 +53,7 @@ class FakeLLM:
     async def extract_dispatch(
         self, system: str, user_text: str, *, tool: dict, model: str | None = None
     ) -> dict | None:
-        self.calls.append({"system": system, "user_text": user_text, "tool": tool})
+        self.calls.append({"system": system, "user_text": user_text, "tool": tool, "model": model})
         return self._result
 
 
@@ -371,3 +371,11 @@ def test_missing_guild_id_rejected():
     result = run(make_router(llm, svc).route(no_guild, "카테고리 만들어"))
     assert result is not None and ("서버 안에서만" in result or "⛔" in result)
     assert svc.calls == []
+
+def test_dispatch_uses_configured_model():
+    """비용 절감: dispatch_model 설정 시 extract_dispatch 에 그 모델(haiku)이 전달된다."""
+    llm = FakeLLM({"verb": "none"})
+    svc = FakeService()
+    router = NLRouter(llm=llm, service=svc, dispatch_model="claude-haiku-x")
+    run(router.route(ADMIN_AUTH, "안녕"))
+    assert llm.calls and llm.calls[0]["model"] == "claude-haiku-x"

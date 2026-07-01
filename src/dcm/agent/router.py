@@ -111,9 +111,12 @@ class NLRouter:
         self,
         llm: LLMClient,
         service: GuildAdminService,
+        dispatch_model: str | None = None,
     ) -> None:
         self._llm = llm
         self._service = service
+        # 분류(dispatch)는 값싼 모델로 — 매 멘션마다 도는 경로라 비용 큼. None이면 기본 모델.
+        self._dispatch_model = dispatch_model
 
     async def route(self, auth: AuthContext, user_text: str) -> str | None:
         """NL 텍스트를 파싱해 관리 명령 실행 결과를 반환하거나, 폴백 시 None 반환.
@@ -124,6 +127,7 @@ class NLRouter:
             _DISPATCH_SYSTEM,
             user_text,
             tool=DISPATCH_TOOL,
+            model=self._dispatch_model,
         )
         if extracted is None:
             return None
