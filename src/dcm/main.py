@@ -20,6 +20,7 @@ from .scheduler import BackgroundJobs
 from .service.onboarding import OnboardingPolicy
 from .service.guild_settings import GuildSettings, GuildSettingsStore
 from .service.announcements import AnnouncementStore, EventStore
+from .service.study_lookup import StudyLookup
 
 log = logging.getLogger("dcm")
 
@@ -129,6 +130,7 @@ async def _run() -> None:
         retrieval_top_n=settings.retrieval_top_n,
         router=nl_router,
         leveling=leveling_service,
+        studies=StudyLookup(),  # 스터디 상세 온디맨드 읽기(깊은 질문일 때만 문서 fetch)
     )
     adapter.on_mention(orchestrator.handle)
 

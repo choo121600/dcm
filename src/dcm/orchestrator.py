@@ -57,6 +57,7 @@ class Orchestrator:
         retrieval_top_n: int = 6,
         router: object | None = None,
         leveling=None,
+        studies=None,
     ) -> None:
         self._llm = llm
         self._bot_name = bot_name
@@ -73,6 +74,7 @@ class Orchestrator:
         self._top_n = retrieval_top_n
         self._router = router
         self._leveling = leveling  # LevelingService (신뢰 게이팅 G003/G004), 없으면 게이팅 비활성
+        self._studies = studies  # StudyLookup (선택). 스터디 상세 온디맨드 읽기; None이면 비활성
         self._web_last: dict[str, float] = {}  # per-user 웹 검색 마지막 호출 시각
         # 채널 독점 완화(anti-fatigue): 채널별 최근 봇 답변 (author_id, monotonic) 이력 + (채널,유저) 침묵 만료.
         self._chan_replies: dict[str, deque[tuple[str, float]]] = {}
@@ -256,8 +258,19 @@ class Orchestrator:
             lines = "\n".join(f"- {c}" for c in recalled)
             memory_block = f"[what you remember]\n{lines}\n\n"
 
+        # 스터디 상세는 깊은 질문일 때만 해당 문서를 온디맨드로 읽어 이 메시지에만 주입(토큰 절약).
+        study_block = ""
+        if self._studies is not None:
+            try:
+                detail = await self._studies.maybe_fetch(text)
+            except Exception:  # noqa: BLE001 - 문서 읽기 실패는 조용히 폴백
+                detail = None
+            if detail:
+                study_block = f"[study detail — 이 문서를 근거로 커리큘럼을 설명해줘]\n{detail}\n\n"
+
         user_content = (
             f"{memory_block}"
+            f"{study_block}"
             f"[recent conversation]\n{self._format_buffer(buffer)}\n\n"
             f"[{incoming.author_name} mentions you]\n{text}"
         )

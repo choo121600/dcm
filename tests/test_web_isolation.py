@@ -222,3 +222,38 @@ def test_system_prompt_without_knowledge_omits_block(tmp_path):
     sp = orch._system_prompt(None)
     assert "SUSC 지식 마커 XYZ" not in sp
     assert "[server knowledge]\n" not in sp
+
+def test_study_detail_injected_on_deep_question(tmp_path):
+    """깊은 스터디 질문이면 온디맨드로 읽은 문서가 [study detail]로 프롬프트에 주입된다."""
+    llm, fake_client = _build_llm()
+
+    class FakeStudies:
+        async def maybe_fetch(self, text):
+            return "## 강의 계획\n- 1주차: 개념" if "커리큘럼" in text else None
+
+    persona = tmp_path / "persona.md"
+    persona.write_text("페르소나", encoding="utf-8")
+    orch = Orchestrator(
+        llm=llm, persona_path=persona, bot_name="지우", max_input_chars=4000, studies=FakeStudies()
+    )
+    run(orch.handle(_incoming(text="airflow 커리큘럼 알려줘"), []))
+    content = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "study detail" in content and "1주차: 개념" in content
+
+
+def test_study_detail_absent_on_shallow_question(tmp_path):
+    """얕은 질문이면 문서를 읽지 않아 프롬프트에 [study detail] 이 없다(토큰 절약)."""
+    llm, fake_client = _build_llm()
+
+    class FakeStudies:
+        async def maybe_fetch(self, text):
+            return None
+
+    persona = tmp_path / "persona.md"
+    persona.write_text("페르소나", encoding="utf-8")
+    orch = Orchestrator(
+        llm=llm, persona_path=persona, bot_name="지우", max_input_chars=4000, studies=FakeStudies()
+    )
+    run(orch.handle(_incoming(text="무슨 스터디 있어"), []))
+    content = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "study detail" not in content
