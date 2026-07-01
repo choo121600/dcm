@@ -560,9 +560,13 @@ class _SettingsCtx:
         self.author = _SettingsAuthor()
         self.guild_id = 123
         self.responses: list = []
+        self.deferred = False
 
     async def respond(self, text, **kw):
         self.responses.append((text, kw))
+
+    async def defer(self, **kw):
+        self.deferred = True
 
 
 def _settings_adapter(settings=None):
@@ -909,3 +913,82 @@ class TestEventCommands:
         )
         assert store.list_enabled() == []
         store.close()
+
+
+class _EchoLLM:
+    """polish 경로 확인용 가짜 LLM — 항상 고정 문구 반환."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(self, system, messages, **kw):
+        self.calls += 1
+        return ("✨다듬음✨", False)
+
+
+class TestPolishCopy:
+    @staticmethod
+    def _adapter(tmp_path, with_llm=True):
+        import types
+
+        from dcm.service.announcements import AnnouncementStore, EventStore
+        from dcm.service.guild_admin import GuildAdminService
+
+        events = EventStore(str(tmp_path / "evt.db"))
+        anns = AnnouncementStore(str(tmp_path / "ann.db"))
+        llm = _EchoLLM() if with_llm else None
+        a = PycordAdapter(
+            token="x", bot_name="썩스가재", guild_id=123, admin_role_id=0,
+            guild_settings=_FakeSettings(), events=events, announcements=anns, llm=llm,
+        )
+        a.register_admin_commands(GuildAdminService(a, a.pending))
+        return a, events, anns, llm, types.SimpleNamespace(id=555, mention="<#555>")
+
+    def test_event_add_polish_true_stores_refined(self, loop, tmp_path):
+        a, events, anns, llm, ch = self._adapter(tmp_path)
+        ctx = _SettingsCtx()
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(
+                ctx, channel=ch, title="OT", at="2099-07-15 19:00", note="대충 씀", polish=True,
+            )
+        )
+        e = events.list_for_guild(123)[0]
+        assert e.message == "✨다듬음✨" and llm.calls == 1 and ctx.deferred
+        events.close()
+        anns.close()
+
+    def test_event_add_polish_false_stores_verbatim(self, loop, tmp_path):
+        a, events, anns, llm, ch = self._adapter(tmp_path)
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(
+                _SettingsCtx(), channel=ch, title="OT", at="2099-07-15 19:00", note="원문 그대로", polish=False,
+            )
+        )
+        e = events.list_for_guild(123)[0]
+        assert e.message == "원문 그대로" and llm.calls == 0
+        events.close()
+        anns.close()
+
+    def test_announce_add_polish_true_stores_refined(self, loop, tmp_path):
+        a, events, anns, llm, ch = self._adapter(tmp_path)
+        loop.run_until_complete(
+            _find_cmd(a, "announce-add").callback(
+                _SettingsCtx(), channel=ch, message="회의 오셈", cron="0 9 * * 1", polish=True,
+            )
+        )
+        item = anns.list_for_guild(123)[0]
+        assert item.message == "✨다듬음✨" and llm.calls == 1
+        events.close()
+        anns.close()
+
+    def test_polish_without_llm_falls_back_to_verbatim(self, loop, tmp_path):
+        a, events, anns, llm, ch = self._adapter(tmp_path, with_llm=False)
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(
+                _SettingsCtx(), channel=ch, title="OT", at="2099-07-15 19:00", note="엘엘엠없음", polish=True,
+            )
+        )
+        e = events.list_for_guild(123)[0]
+        assert e.message == "엘엘엠없음"  # llm None → 원문 그대로
+        events.close()
+        anns.close()

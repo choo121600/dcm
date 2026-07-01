@@ -97,6 +97,7 @@ async def _run() -> None:
         guild_settings=guild_settings,
         announcements=announcements,
         events=events,
+        llm=llm,
     )
 
     # Guild-management slash commands (ralplan S2).

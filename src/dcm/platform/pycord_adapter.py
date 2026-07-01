@@ -71,6 +71,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         guild_settings=None,
         announcements=None,
         events=None,
+        llm=None,
     ) -> None:
         self._token = token
         self._bot_name = bot_name
@@ -90,6 +91,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._leveling = None  # LevelingService, register_leveling_commands 에서 주입
         self._announcements = announcements  # 예약 공지 저장소(AnnouncementStore); None이면 비활성
         self._events = events  # 행사 카운트다운 공지 저장소(EventStore); None이면 비활성
+        self._llm = llm  # LLMClient (선택). 공지/행사 문구 다듬기(폴리시)에만 사용; None이면 다듬기 비활성
         self._announce_task = None
 
         intents = discord.Intents.default()
@@ -1055,41 +1057,50 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
 
         @self.admin_command(
             name="announce-add",
-            description="반복 공지 예약 (cron, KST). 예: '0 9 * * 1' = 매주 월 09:00.",
+            description="반복 공지 예약 (cron, KST). 예: '0 9 * * 1'. polish=true면 문구 다듬기.",
         )
         async def announce_add(
             ctx,
             channel: discord.Option(discord.TextChannel, "공지 채널"),
             message: str,
             cron: str,
+            polish: bool = False,
         ):
             if self._announcements is None:
                 await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
                 return
+            msg = message
+            if polish and self._llm is not None and msg.strip():
+                await ctx.defer(ephemeral=True)
+                from ..service.copywriter import polish_copy
+
+                msg = await polish_copy(self._llm, bot_name=self._bot_name, raw=msg, kind="announce")
             try:
                 aid = self._announcements.add(
                     guild_id=self._ctx_guild(ctx),
                     channel_id=channel.id,
-                    message=message,
+                    message=msg,
                     cron=cron.strip(),
                     created_by=self._actor(ctx)[1],
                 )
             except Exception as exc:  # noqa: BLE001 - cron 검증 실패 등
                 await ctx.respond(f"cron 이 올바르지 않아: {exc}", ephemeral=True)
                 return
-            await ctx.respond(
-                f"✅ 반복 공지 #{aid} 등록: {channel.mention} 에 `{cron.strip()}` (KST)", ephemeral=True
-            )
+            ack = f"✅ 반복 공지 #{aid} 등록: {channel.mention} 에 `{cron.strip()}` (KST)"
+            if polish and msg.strip():
+                ack += f"\n📝 다듬은 문구: {msg}"
+            await ctx.respond(ack, ephemeral=True)
 
         @self.admin_command(
             name="announce-add-once",
-            description="1회성 공지 예약. 시각은 KST 'YYYY-MM-DD HH:MM'.",
+            description="1회성 공지 예약. 시각 KST. polish=true면 문구 다듬기.",
         )
         async def announce_add_once(
             ctx,
             channel: discord.Option(discord.TextChannel, "공지 채널"),
             message: str,
             at: str,
+            polish: bool = False,
         ):
             if self._announcements is None:
                 await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
@@ -1105,16 +1116,23 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             except ValueError:
                 await ctx.respond("시각 형식이 틀려. 예: 2026-07-15 10:00 (KST)", ephemeral=True)
                 return
+            msg = message
+            if polish and self._llm is not None and msg.strip():
+                await ctx.defer(ephemeral=True)
+                from ..service.copywriter import polish_copy
+
+                msg = await polish_copy(self._llm, bot_name=self._bot_name, raw=msg, kind="announce")
             aid = self._announcements.add(
                 guild_id=self._ctx_guild(ctx),
                 channel_id=channel.id,
-                message=message,
+                message=msg,
                 run_at=run_at,
                 created_by=self._actor(ctx)[1],
             )
-            await ctx.respond(
-                f"✅ 1회 공지 #{aid} 등록: {channel.mention} 에 {at.strip()} (KST)", ephemeral=True
-            )
+            ack = f"✅ 1회 공지 #{aid} 등록: {channel.mention} 에 {at.strip()} (KST)"
+            if polish and msg.strip():
+                ack += f"\n📝 다듬은 문구: {msg}"
+            await ctx.respond(ack, ephemeral=True)
 
         @self.admin_command(name="announce-list", description="이 서버의 예약 공지 목록.")
         async def announce_list(ctx):
@@ -1152,7 +1170,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
 
         @self.admin_command(
             name="event-add",
-            description="행사 일정 카운트다운 공지 (D-30/14/7/3/1/DDAY 자동). 시각 KST.",
+            description="행사 카운트다운 공지 (D-30/14/7/3/1/DDAY). 시각 KST. polish=true면 문구 다듬기.",
         )
         async def event_add(
             ctx,
@@ -1162,6 +1180,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             leads: str = "",
             note: str = "",
             mention: str = "",
+            polish: bool = False,
         ):
             if self._events is None:
                 await ctx.respond("행사 공지 저장소가 없어.", ephemeral=True)
@@ -1189,13 +1208,21 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             except ValueError:
                 await ctx.respond("리드데이 형식이 틀려. 예: 30,14,7,3 (일 단위, 0=당일)", ephemeral=True)
                 return
+            note_text = note.strip() or None
+            if polish and self._llm is not None and note_text:
+                await ctx.defer(ephemeral=True)
+                from ..service.copywriter import polish_copy
+
+                note_text = await polish_copy(
+                    self._llm, bot_name=self._bot_name, raw=note_text, kind="event", title=title,
+                )
             eid = self._events.add(
                 guild_id=self._ctx_guild(ctx),
                 channel_id=channel.id,
                 title=title.strip(),
                 event_at=event_at,
                 lead_days=lead_days,
-                message=note.strip() or None,
+                message=note_text,
                 mention=mention.strip() or None,
                 created_by=self._actor(ctx)[1],
             )
@@ -1211,7 +1238,10 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                 plan = f"지금 바로 **{cur_tag}** 공지 발송" + (f" → 이후 {up_tags}" if up_tags else "")
             else:
                 plan = f"예정 공지: {up_tags}"
-            await ctx.respond(head + plan, ephemeral=True)
+            ack = head + plan
+            if polish and note_text:
+                ack += f"\n📝 다듬은 문구: {note_text}"
+            await ctx.respond(ack, ephemeral=True)
 
         @self.admin_command(name="event-list", description="이 서버의 행사 일정 목록.")
         async def event_list(ctx):
