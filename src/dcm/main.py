@@ -19,6 +19,7 @@ from .agent.router import NLRouter
 from .scheduler import BackgroundJobs
 from .service.onboarding import OnboardingPolicy
 from .service.guild_settings import GuildSettings, GuildSettingsStore
+from .service.announcements import AnnouncementStore
 
 log = logging.getLogger("dcm")
 
@@ -72,6 +73,9 @@ async def _run() -> None:
         ),
     )
 
+    # 예약 공지 저장소 (관리봇: 주기/1회성 공지). memory.db 동일 파일.
+    announcements = AnnouncementStore(settings.memory_db)
+
     onboarding = OnboardingPolicy(
         settings=guild_settings,
         welcome_channel_id=settings.welcome_channel_id,
@@ -88,6 +92,7 @@ async def _run() -> None:
         admin_role_id=settings.admin_role_id,
         onboarding_policy=onboarding,
         guild_settings=guild_settings,
+        announcements=announcements,
     )
 
     # Guild-management slash commands (ralplan S2).

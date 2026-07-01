@@ -758,3 +758,64 @@ class TestNlAuthzPerGuild:
         msg = _FakeMessage(ch, self._member(9), "지우야 서버 구조 yaml로 뽑아줘", [], guild=_FakeGuild(gid=55))
         loop.run_until_complete(a._handle_export(msg))
         assert any("내보내기" in s for s in ch.sent)  # 비관리자 → 거부 메시지
+
+
+# ---------------------------------------------------------------------------
+# 예약 공지 슬래시 커맨드 배선
+# ---------------------------------------------------------------------------
+
+
+class TestAnnounceCommands:
+    @staticmethod
+    def _adapter(tmp_path):
+        import types
+
+        from dcm.service.announcements import AnnouncementStore
+        from dcm.service.guild_admin import GuildAdminService
+
+        store = AnnouncementStore(str(tmp_path / "ann.db"))
+        a = PycordAdapter(
+            token="x",
+            bot_name="지우",
+            guild_id=123,
+            admin_role_id=0,
+            guild_settings=_FakeSettings(),
+            announcements=store,
+        )
+        a.register_admin_commands(GuildAdminService(a, a.pending))
+        return a, store, types.SimpleNamespace(id=555, mention="<#555>")
+
+    def test_announce_add_records_recurring(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        cmd = _find_cmd(a, "announce-add")
+        loop.run_until_complete(cmd.callback(_SettingsCtx(), channel=ch, message="주간 회의", cron="0 9 * * 1"))
+        items = store.list_for_guild(123)
+        assert len(items) == 1 and items[0].cron == "0 9 * * 1" and items[0].channel_id == "555"
+        store.close()
+
+    def test_announce_add_bad_cron_reports_error(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        ctx = _SettingsCtx()
+        loop.run_until_complete(_find_cmd(a, "announce-add").callback(ctx, channel=ch, message="m", cron="nope"))
+        assert store.list_for_guild(123) == []  # 등록 안 됨
+        assert any("cron" in r[0] for r in ctx.responses)
+        store.close()
+
+    def test_announce_add_once_parses_kst(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        loop.run_until_complete(
+            _find_cmd(a, "announce-add-once").callback(_SettingsCtx(), channel=ch, message="이벤트", at="2026-07-15 10:00")
+        )
+        items = store.list_for_guild(123)
+        assert len(items) == 1 and items[0].run_at is not None and items[0].cron is None
+        store.close()
+
+    def test_announce_list_and_remove(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        aid = store.add(guild_id=123, channel_id=555, message="m", cron="* * * * *")
+        ctx = _SettingsCtx()
+        loop.run_until_complete(_find_cmd(a, "announce-list").callback(ctx))
+        assert any(f"#{aid}" in r[0] for r in ctx.responses)
+        loop.run_until_complete(_find_cmd(a, "announce-remove").callback(_SettingsCtx(), ann_id=aid))
+        assert store.list_for_guild(123) == []
+        store.close()

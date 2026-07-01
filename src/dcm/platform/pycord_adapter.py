@@ -69,6 +69,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         admin_role_id: int = 0,
         onboarding_policy=None,
         guild_settings=None,
+        announcements=None,
     ) -> None:
         self._token = token
         self._bot_name = bot_name
@@ -86,6 +87,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._settings = guild_settings  # per-guild 설정/관리역할 (멀티길드 v2); None이면 env 시드값 폴백
         self._public_commands: list[str] = []  # 비가드 멤버 공개 명령 registry (leveling 표시)
         self._leveling = None  # LevelingService, register_leveling_commands 에서 주입
+        self._announcements = announcements  # 예약 공지 저장소(AnnouncementStore); None이면 비활성
+        self._announce_task = None
 
         intents = discord.Intents.default()
         # Privileged — must also be enabled in the Developer Portal (DESIGN.md §14.2).
@@ -112,6 +115,32 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         intents = self._client.intents
         log.info("privileged intent message_content=%s", intents.message_content)
         log.info("privileged intent members=%s", intents.members)
+        if self._announcements is not None and self._announce_task is None:
+            self._announce_task = asyncio.create_task(self._announce_loop())
+            log.info("scheduled-announcement loop started")
+
+    async def _announce_loop(self) -> None:
+        """매분 예약 공지를 확인해 발화(예외 침묵 degrade). on_ready 에서 1회 시작."""
+        from ..service.announcements import is_due, minute_key
+
+        while True:
+            try:
+                now = time.time()
+                for ann in self._announcements.list_enabled():
+                    if not is_due(ann, now):
+                        continue
+                    try:
+                        channel = self._client.get_channel(int(ann.channel_id))
+                        if channel is not None:
+                            await self._send_to(channel, ann.message)
+                        self._announcements.mark_fired(ann.id, minute_key(now))
+                        if ann.run_at is not None:  # 1회성 → 발화 후 비활성화
+                            self._announcements.set_enabled(ann.id, ann.guild_id, False)
+                    except Exception:  # noqa: BLE001 - 개별 공지 실패는 침묵, 루프 유지
+                        log.exception("announcement %s fire failed", ann.id)
+            except Exception:  # noqa: BLE001
+                log.exception("announcement loop tick failed")
+            await asyncio.sleep(60)
 
     async def on_message(self, message: discord.Message) -> None:
         # Ignore self and other bots.
@@ -998,6 +1027,103 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                     confirm_token=t,
                 ),
                 confirm=confirm,
+            )
+
+        @self.admin_command(
+            name="announce-add",
+            description="반복 공지 예약 (cron, KST). 예: '0 9 * * 1' = 매주 월 09:00.",
+        )
+        async def announce_add(
+            ctx,
+            channel: discord.Option(discord.TextChannel, "공지 채널"),
+            message: str,
+            cron: str,
+        ):
+            if self._announcements is None:
+                await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
+                return
+            try:
+                aid = self._announcements.add(
+                    guild_id=self._ctx_guild(ctx),
+                    channel_id=channel.id,
+                    message=message,
+                    cron=cron.strip(),
+                    created_by=self._actor(ctx)[1],
+                )
+            except Exception as exc:  # noqa: BLE001 - cron 검증 실패 등
+                await ctx.respond(f"cron 이 올바르지 않아: {exc}", ephemeral=True)
+                return
+            await ctx.respond(
+                f"✅ 반복 공지 #{aid} 등록: {channel.mention} 에 `{cron.strip()}` (KST)", ephemeral=True
+            )
+
+        @self.admin_command(
+            name="announce-add-once",
+            description="1회성 공지 예약. 시각은 KST 'YYYY-MM-DD HH:MM'.",
+        )
+        async def announce_add_once(
+            ctx,
+            channel: discord.Option(discord.TextChannel, "공지 채널"),
+            message: str,
+            at: str,
+        ):
+            if self._announcements is None:
+                await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
+                return
+            from datetime import datetime
+
+            from ..service.announcements import KST
+
+            try:
+                run_at = (
+                    datetime.strptime(at.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=KST).timestamp()
+                )
+            except ValueError:
+                await ctx.respond("시각 형식이 틀려. 예: 2026-07-15 10:00 (KST)", ephemeral=True)
+                return
+            aid = self._announcements.add(
+                guild_id=self._ctx_guild(ctx),
+                channel_id=channel.id,
+                message=message,
+                run_at=run_at,
+                created_by=self._actor(ctx)[1],
+            )
+            await ctx.respond(
+                f"✅ 1회 공지 #{aid} 등록: {channel.mention} 에 {at.strip()} (KST)", ephemeral=True
+            )
+
+        @self.admin_command(name="announce-list", description="이 서버의 예약 공지 목록.")
+        async def announce_list(ctx):
+            if self._announcements is None:
+                await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
+                return
+            items = self._announcements.list_for_guild(self._ctx_guild(ctx))
+            if not items:
+                await ctx.respond("등록된 예약 공지가 없어.", ephemeral=True)
+                return
+            lines = []
+            for a in items:
+                when = f"cron `{a.cron}` (KST)" if a.cron else "1회성"
+                state = "" if a.enabled else " ⏸️꺼짐"
+                lines.append(f"#{a.id} · <#{a.channel_id}> · {when}{state} · {a.message[:40]}")
+            await ctx.respond("\n".join(lines)[:1900], ephemeral=True)
+
+        @self.admin_command(name="announce-remove", description="예약 공지 삭제 (id).")
+        async def announce_remove(ctx, ann_id: int):
+            if self._announcements is None:
+                await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
+                return
+            ok = self._announcements.remove(int(ann_id), self._ctx_guild(ctx))
+            await ctx.respond(f"{'🗑️ 삭제됨' if ok else '해당 id 없음'}: #{int(ann_id)}", ephemeral=True)
+
+        @self.admin_command(name="announce-toggle", description="예약 공지 켜기/끄기 (id, enabled).")
+        async def announce_toggle(ctx, ann_id: int, enabled: bool):
+            if self._announcements is None:
+                await ctx.respond("예약 공지 저장소가 없어.", ephemeral=True)
+                return
+            ok = self._announcements.set_enabled(int(ann_id), self._ctx_guild(ctx), enabled)
+            await ctx.respond(
+                f"{'✅' if ok else '해당 id 없음'}: #{int(ann_id)} {'켬' if enabled else '끔'}", ephemeral=True
             )
 
 
