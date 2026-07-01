@@ -218,8 +218,13 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         if role is None:
             await interaction.response.send_message("이 스터디 역할이 없어졌어. 운영진에게 알려줘.", ephemeral=True)
             return
-        if role.permissions.value != 0:
-            await interaction.response.send_message("이 역할은 버튼으로 받을 수 없어.", ephemeral=True)
+        # @everyone 기준 초과 권한을 주는 역할은 셀프부여 금지(권한 상승 차단). 스터디 역할은
+        # @everyone 과 동일하거나 권한 없음 → 허용. (역할 생성 시 permissions 미지정이면 @everyone 값 복사됨)
+        everyone_perms = guild.default_role.permissions.value if getattr(guild, "default_role", None) else 0
+        if (role.permissions.value & ~everyone_perms) != 0:
+            await interaction.response.send_message(
+                "이 역할은 버튼으로 받을 수 없어(권한이 있는 역할).", ephemeral=True
+            )
             return
         try:
             if role in member.roles:
