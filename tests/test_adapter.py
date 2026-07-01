@@ -19,7 +19,8 @@ import pytest
 
 from dcm.platform.base import BufferedMessage, IncomingMessage
 from dcm.platform.pycord_adapter import (
-    _THREAD_NUDGE_STREAK,
+    _CUTLINE,
+    _NUDGE_STREAK,
     PycordAdapter,
     split_for_discord,
 )
@@ -1014,8 +1015,15 @@ class _FakeThread:
         self.sent.append(text)
 
 
-def _thread_adapter():
-    adapter = _adapter()
+def _thread_adapter(style: str = "thread"):
+    adapter = PycordAdapter(
+        token="test-token",
+        bot_name="지우",
+        buffer_size=5,
+        cooldown_seconds=0.0,
+        guild_id=123,
+        nudge_style=style,
+    )
     bot_user = _FakeUser(999, bot=True, name="지우")
     _swap_in_fake_user(adapter, bot_user)
     return adapter, bot_user
@@ -1034,9 +1042,9 @@ def _make_addressed_msg(channel, author, bot_user, created: list):
 
 
 def test_sustained_1on1_creates_thread_on_streak(loop):
-    """같은 유저가 한 채널에서 연속으로 봇을 부르면 streak 임계에서 스레드가 생기고
+    """thread 스타일: 같은 유저가 연속으로 봇을 부르면 streak 임계에서 스레드가 생기고
     그 답변은 채널이 아니라 스레드로 간다."""
-    adapter, bot_user = _thread_adapter()
+    adapter, bot_user = _thread_adapter("thread")
 
     async def handler(incoming, buffer):
         return "그래 ㅋㅋ"
@@ -1048,12 +1056,12 @@ def test_sustained_1on1_creates_thread_on_streak(loop):
     created: list = []
 
     # 임계 직전(streak-1)까지: 전부 채널로, 스레드 없음
-    for _ in range(_THREAD_NUDGE_STREAK - 1):
+    for _ in range(_NUDGE_STREAK - 1):
         loop.run_until_complete(
             adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
         )
     assert created == []
-    assert channel.sent == ["그래 ㅋㅋ"] * (_THREAD_NUDGE_STREAK - 1)
+    assert channel.sent == ["그래 ㅋㅋ"] * (_NUDGE_STREAK - 1)
 
     # 임계 도달: 스레드 생성 + 답변은 스레드로, 채널 sent 는 그대로
     loop.run_until_complete(
@@ -1061,12 +1069,12 @@ def test_sustained_1on1_creates_thread_on_streak(loop):
     )
     assert len(created) == 1
     assert created[0].sent == ["그래 ㅋㅋ"]
-    assert channel.sent == ["그래 ㅋㅋ"] * (_THREAD_NUDGE_STREAK - 1)
+    assert channel.sent == ["그래 ㅋㅋ"] * (_NUDGE_STREAK - 1)
 
 
 def test_alternating_users_never_thread(loop):
-    """서로 다른 유저가 번갈아 부르면 연속 streak 이 쌓이지 않아 스레드를 만들지 않는다."""
-    adapter, bot_user = _thread_adapter()
+    """thread 스타일: 서로 다른 유저가 번갈아 부르면 연속 streak 이 안 쌓여 스레드를 안 만든다."""
+    adapter, bot_user = _thread_adapter("thread")
 
     async def handler(incoming, buffer):
         return "ㅇㅇ"
@@ -1077,18 +1085,18 @@ def test_alternating_users_never_thread(loop):
     b = _FakeUser(2, name="b")
     channel = _FakeChannel([])
     created: list = []
-    for i in range(_THREAD_NUDGE_STREAK * 2):
+    for i in range(_NUDGE_STREAK * 2):
         who = a if i % 2 == 0 else b
         loop.run_until_complete(
             adapter.on_message(_make_addressed_msg(channel, who, bot_user, created))
         )
     assert created == []
-    assert len(channel.sent) == _THREAD_NUDGE_STREAK * 2
+    assert len(channel.sent) == _NUDGE_STREAK * 2
 
 
 def test_no_nested_thread_when_already_in_thread(loop):
-    """이미 스레드 안(channel.type=public_thread)이면 임계를 넘겨도 중첩 스레드를 만들지 않는다."""
-    adapter, bot_user = _thread_adapter()
+    """thread 스타일: 이미 스레드 안(channel.type=public_thread)이면 임계를 넘겨도 중첩 안 만든다."""
+    adapter, bot_user = _thread_adapter("thread")
 
     async def handler(incoming, buffer):
         return "여기 스레드"
@@ -1099,12 +1107,61 @@ def test_no_nested_thread_when_already_in_thread(loop):
     channel = _FakeChannel([])
     channel.type = discord.ChannelType.public_thread
     created: list = []
-    for _ in range(_THREAD_NUDGE_STREAK + 2):
+    for _ in range(_NUDGE_STREAK + 2):
         loop.run_until_complete(
             adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
         )
     assert created == []
-    assert len(channel.sent) == _THREAD_NUDGE_STREAK + 2
+    assert len(channel.sent) == _NUDGE_STREAK + 2
+
+
+def test_divider_cutline_on_streak(loop):
+    """divider 스타일(기본): streak 임계에서 답변은 채널에 그대로 두고 뒤에 절취선(✂)을 남긴다."""
+    adapter, bot_user = _thread_adapter("divider")
+
+    async def handler(incoming, buffer):
+        return "웅웅"
+
+    adapter.on_mention(handler)
+
+    author = _FakeUser(1, name="choo")
+    channel = _FakeChannel([])
+    created: list = []
+
+    # 임계 직전: 답변만, 절취선 없음
+    for _ in range(_NUDGE_STREAK - 1):
+        loop.run_until_complete(
+            adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+        )
+    assert channel.sent == ["웅웅"] * (_NUDGE_STREAK - 1)
+
+    # 임계 도달: 답변 + 절취선(_CUTLINE)이 뒤따르고, 스레드는 안 생김
+    loop.run_until_complete(
+        adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+    )
+    assert created == []
+    assert channel.sent[-2:] == ["웅웅", _CUTLINE]
+
+
+def test_off_style_no_nudge(loop):
+    """off 스타일: 아무리 독점해도 절취선/스레드 없이 평소대로 답변만 한다."""
+    adapter, bot_user = _thread_adapter("off")
+
+    async def handler(incoming, buffer):
+        return "ok"
+
+    adapter.on_mention(handler)
+
+    author = _FakeUser(1, name="choo")
+    channel = _FakeChannel([])
+    created: list = []
+    for _ in range(_NUDGE_STREAK + 3):
+        loop.run_until_complete(
+            adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+        )
+    assert created == []
+    assert channel.sent == ["ok"] * (_NUDGE_STREAK + 3)
+    assert _CUTLINE not in channel.sent
 
 
 # ── 스터디 참여 버튼(studyjoin) 인터랙션 ──────────────────────────────────
@@ -1133,8 +1190,13 @@ class _SJMember:
 
 
 class _SJGuild:
-    def __init__(self, roles):
+    def __init__(self, roles, everyone_perms=0):
+        import types
+
         self._roles = {r.id: r for r in roles}
+        self.default_role = types.SimpleNamespace(
+            permissions=types.SimpleNamespace(value=everyone_perms)
+        )
 
     def get_role(self, rid):
         return self._roles.get(rid)
@@ -1183,13 +1245,23 @@ class TestStudyJoin:
         assert any("나왔어" in m[0] for m in it.response.messages)
 
     def test_privileged_role_rejected(self, loop):
+        # @everyone(view+send=3072) 을 넘는 권한(관리자 비트)을 주는 역할은 셀프부여 거부
         a = self._adapter()
-        role = _SJRole(999, "운영진", perms=8)  # Administrator 비트
+        role = _SJRole(999, "운영진", perms=3072 | 8)  # everyone + Administrator
         member = _SJMember(roles=[])
-        it = _SJInteraction("studyjoin:999", _SJGuild([role]), member)
+        it = _SJInteraction("studyjoin:999", _SJGuild([role], everyone_perms=3072), member)
         loop.run_until_complete(a._on_component_interaction(it))
         assert member.added == [] and role not in member.roles
         assert any("버튼으로 받을 수 없어" in m[0] for m in it.response.messages)
+
+    def test_role_equal_everyone_perms_allowed(self, loop):
+        # 스터디 역할이 @everyone 과 동일한 권한을 복사받아도(생성 기본) 셀프부여 허용
+        a = self._adapter()
+        role = _SJRole(555, "알고리즘(초급)", perms=3072)
+        member = _SJMember(roles=[])
+        it = _SJInteraction("studyjoin:555", _SJGuild([role], everyone_perms=3072), member)
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert role in member.roles and any("참여 완료" in m[0] for m in it.response.messages)
 
     def test_non_studyjoin_custom_id_ignored(self, loop):
         a = self._adapter()

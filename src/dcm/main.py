@@ -98,6 +98,7 @@ async def _run() -> None:
         announcements=announcements,
         events=events,
         llm=llm,
+        nudge_style=settings.nudge_style,
     )
 
     # Guild-management slash commands (ralplan S2).

@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     max_input_chars: int = 4000  # input cap (DESIGN.md §14.4)
     cooldown_seconds: float = 3.0  # per-user mention cooldown (DESIGN.md §14.4)
     recent_buffer_size: int = 12
+    # 독점 완화 넛지 스타일 (anti-fatigue): divider(절취선, 기본) | thread(스레드로 이동) | off
+    nudge_style: str = "divider"
 
     # Memory (M2) — DESIGN.md §5, §6
     memory_db: str = "data/memory.db"

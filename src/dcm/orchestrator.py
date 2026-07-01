@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from pathlib import Path
 
 from . import commands
@@ -24,6 +25,15 @@ _LLM_QUOTA_REPLY = (
 )
 # 웹 검색 per-user 쿨다운 (비용 가드, ralplan S4): 30초 내 재검색 불가
 _WEB_COOLDOWN_SECONDS = 30.0
+
+# 채널 독점 완화 (anti-fatigue): 한 사람이 공개 채널에서 봇 답변을 독점하면 다른 참여자 피로를
+# 줄이려 winding-down 안내 1회 + 잠깐 침묵. 1:1(다른 사람 부재)에는 발동하지 않는다.
+_MONOPOLY_WINDOW_SECONDS = 300.0  # 최근 봇 답변 집계 슬라이딩 윈도(초)
+_MONOPOLY_MIN_REPLIES = 6  # 이 창에 봇 답변이 이만큼 쌓여야 독점 판정 후보
+_MONOPOLY_SHARE = 0.7  # 한 사람이 최근 답변의 이 비율 이상을 차지하면 독점으로 봄
+_MONOPOLY_MUTE_SECONDS = 180.0  # winding-down 후 그 (채널,유저) 침묵 유지 구간(초)
+_MONOPOLY_MAX_CHANNELS = 2000  # 인메모리 추적 채널 상한(초과 시 stale sweep)
+_MONOPOLY_REPLY = "오늘 나랑 진짜 많이 놀았다 ㅋㅋ 딴 사람들도 있으니까 좀 이따 다시 부르셈 😉"
 
 
 class Orchestrator:
@@ -58,6 +68,9 @@ class Orchestrator:
         self._router = router
         self._leveling = leveling  # LevelingService (신뢰 게이팅 G003/G004), 없으면 게이팅 비활성
         self._web_last: dict[str, float] = {}  # per-user 웹 검색 마지막 호출 시각
+        # 채널 독점 완화(anti-fatigue): 채널별 최근 봇 답변 (author_id, monotonic) 이력 + (채널,유저) 침묵 만료.
+        self._chan_replies: dict[str, deque[tuple[str, float]]] = {}
+        self._chan_muted: dict[tuple[str, str], float] = {}
 
     def _self_block(self, store) -> str:
         if not store:
@@ -112,6 +125,53 @@ class Orchestrator:
             log.exception("recall failed; replying without memory")
             return []
 
+    def _is_monopolizing(
+        self,
+        channel_id: str,
+        author_id: str,
+        author_name: str,
+        buffer: list[BufferedMessage],
+        mono: float,
+    ) -> bool:
+        """한 사람이 공개 채널에서 봇 답변을 독점하는지 판정(anti-fatigue).
+
+        최근 _MONOPOLY_WINDOW_SECONDS 창의 봇 답변이 _MONOPOLY_MIN_REPLIES 이상이고, 그중 이
+        author 비중이 _MONOPOLY_SHARE 이상이며, 버퍼에 다른 '사람'이 있을 때만 True. 1:1(다른
+        참여자 부재)은 피로 유발 대상이 없으므로 발동하지 않는다.
+        """
+        dq = self._chan_replies.get(channel_id)
+        if not dq:
+            return False
+        cutoff = mono - _MONOPOLY_WINDOW_SECONDS
+        while dq and dq[0][1] < cutoff:
+            dq.popleft()
+        total = len(dq)
+        if total < _MONOPOLY_MIN_REPLIES:
+            return False
+        mine = sum(1 for a, _ in dq if a == author_id)
+        if mine / total < _MONOPOLY_SHARE:
+            return False
+        # 버퍼에 이 사람 말고 다른 '사람'이 있는지 (표시이름 기준 휴리스틱; 봇 메시지는 제외).
+        return any(
+            (not b.is_bot) and b.author_name and b.author_name != author_name for b in buffer
+        )
+
+    def _record_channel_reply(self, channel_id: str, author_id: str) -> None:
+        """실제 페르소나 답변 1건을 채널 독점 완화용 이력에 기록(명령/특권/캔드 경로는 제외)."""
+        dq = self._chan_replies.get(channel_id)
+        if dq is None:
+            dq = deque()
+            self._chan_replies[channel_id] = dq
+        dq.append((author_id, time.monotonic()))
+        # 인메모리 상한: 추적 채널이 너무 많아지면 최근 활동 없는 채널/만료된 mute 를 정리.
+        if len(self._chan_replies) > _MONOPOLY_MAX_CHANNELS:
+            now = time.monotonic()
+            cutoff = now - _MONOPOLY_WINDOW_SECONDS
+            self._chan_replies = {
+                c: d for c, d in self._chan_replies.items() if d and d[-1][1] >= cutoff
+            }
+            self._chan_muted = {k: v for k, v in self._chan_muted.items() if v >= now}
+
     async def handle(
         self, incoming: IncomingMessage, buffer: list[BufferedMessage]
     ) -> str | None:
@@ -162,6 +222,19 @@ class Orchestrator:
             if not allowed:
                 return _LLM_QUOTA_REPLY
 
+        # 채널 독점 완화 (anti-fatigue): 한 사람이 공개 채널에서 봇 답변을 독점하면 LLM 호출 전
+        # winding-down 안내 1회 후 그 (채널,유저) 를 잠깐 침묵(mute). 버퍼에 다른 사람이 있을 때만.
+        mono = time.monotonic()
+        chan_key = (incoming.channel_id, incoming.author_id)
+        muted_until = self._chan_muted.get(chan_key)
+        if muted_until is not None and mono < muted_until:
+            return None  # 침묵 구간 — 조용히 넘어감(반복 안내로 다시 소음 내지 않음)
+        if self._is_monopolizing(
+            incoming.channel_id, incoming.author_id, incoming.author_name, buffer, mono
+        ):
+            self._chan_muted[chan_key] = mono + _MONOPOLY_MUTE_SECONDS
+            return _MONOPOLY_REPLY
+
         recalled = await self._recall(text, incoming.author_id, gstore)
         memory_block = ""
         if recalled:
@@ -207,6 +280,8 @@ class Orchestrator:
         # 격리: 웹 검색 파생 답변은 장기 메모리에 저장하지 않음 (ralplan S4, §14.5)
         if self._ingest and reply and not web_used:
             asyncio.create_task(self._safe_ingest(incoming, text, reply))
+        # 독점 완화 집계: 실제 페르소나 답변 1건을 채널 이력에 기록(명령/특권/캔드 경로는 제외).
+        self._record_channel_reply(incoming.channel_id, incoming.author_id)
         return reply
 
     def _handle_command(self, text: str, author_id: str, store) -> str | None:

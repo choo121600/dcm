@@ -37,12 +37,15 @@ _SETUP_INTENT_WORDS = (
 _EXPORT_FORMAT_WORDS = ("yaml", "json", "템플릿", "블루프린트", "blueprint")
 _EXPORT_ACTION_WORDS = ("뽑", "추출", "내보내", "백업", "스냅샷", "snapshot", "export", "dump", "확인", "보여", "구조")
 
-# 스레드 유도 (anti-fatigue): 한 유저가 한 채널에서 봇과 연속 1:1 대화를 이어가면 그 메시지에
-# 공개 스레드를 만들어 이후 답변을 거기로 보내 메인 채널을 정리한다(길드 격리 유지).
-_THREAD_NUDGE_STREAK = 5  # 같은 유저 연속 봇 답변이 이 값에 도달하면 스레드 생성
-_THREAD_NUDGE_COOLDOWN = 600.0  # 스레드 생성 후 그 채널에서 재생성까지 쿨다운(초)
-_THREAD_AUTO_ARCHIVE_MIN = 1440  # 스레드 자동 보관(분): 24h
-# 스레드로 취급할 Discord 채널 타입 — 이 안이면 이미 스레드이므로 중첩 생성하지 않는다.
+# 독점 완화 넛지 (anti-fatigue): 한 유저가 한 채널에서 봇과 연속 1:1 대화를 이어가면(streak) 그
+# 지점에서 넛지를 준다. 스타일은 divider(절취선, 기본)/thread(스레드로 이동)/off 중 택1.
+_NUDGE_STREAK = 5  # 같은 유저 연속 봇 답변이 이 값에 도달하면 넛지 발동
+_NUDGE_COOLDOWN = 600.0  # 넛지 발동 후 그 채널에서 재발동까지 쿨다운(초)
+_NUDGE_STYLES = frozenset({"divider", "thread", "off"})
+# divider 절취선: Discord 는 '---' 를 구분선으로 렌더링하지 않으므로 박스드로잉 점선 + 가위(✂)로 실제 절취선 모양을 낸다.
+_CUTLINE = "✂┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n여기서 잠깐 끊자 ㅋㅋ 딴 얘기도 환영~"
+_THREAD_AUTO_ARCHIVE_MIN = 1440  # (thread 스타일) 스레드 자동 보관(분): 24h
+# 스레드로 취급할 Discord 채널 타입 — 이 안이면 이미 스레드이므로 넛지하지 않는다.
 _THREAD_CHANNEL_TYPES = frozenset(
     t
     for t in (
@@ -88,6 +91,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         announcements=None,
         events=None,
         llm=None,
+        nudge_style: str = "divider",
     ) -> None:
         self._token = token
         self._bot_name = bot_name
@@ -96,10 +100,11 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._guild_id = guild_id  # guild for guild-scoped slash registration (ralplan S1/S2)
         self._admin_role_id = admin_role_id  # designated ADMIN_ROLE for the InvokerCheck (S2)
         self._last_seen: dict[str, float] = {}  # author_id → monotonic ts (cooldown, §14.4)
-        # 스레드 유도(anti-fatigue): 채널별 (마지막 응답 대상 author_id, 연속 streak) + 재생성 쿨다운.
+        # 독점 완화 넛지(anti-fatigue): 채널별 (마지막 응답 대상 author_id, 연속 streak) + 재발동 쿨다운.
+        self._nudge_style = nudge_style if nudge_style in _NUDGE_STYLES else "divider"
         self._chan_addresser: dict[str, str] = {}
         self._chan_streak: dict[str, int] = {}
-        self._thread_cooldown: dict[str, float] = {}
+        self._nudge_cooldown: dict[str, float] = {}
         self._handler: MentionHandler | None = None
         self._service = None  # GuildAdmin policy service, wired in register_admin_commands (S2)
         self._pending = policy.PendingConfirmations()  # adapter-local confirm-token carry (S2)
@@ -308,8 +313,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             reply = None
 
         if reply:
-            target = await self._maybe_thread(message) or message.channel
-            await self._send_to(target, reply)
+            await self._deliver_reply(message, reply)
 
     async def on_member_join(self, member) -> None:
         """신규 멤버 입장 이벤트 핸들러 (S6 온보딩).
@@ -421,16 +425,34 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         for chunk in split_for_discord(text):
             await channel.send(chunk)
 
-    async def _maybe_thread(self, message):
-        """연속 1:1 독점 완화(anti-fatigue): 같은 유저가 한 채널에서 봇과 계속 대화를 이어가면 그
-        메시지에 공개 스레드를 만들어 이후 답변을 거기로 보낸다(길드 격리 유지, 메인 채널 정리).
+    async def _deliver_reply(self, message, reply) -> None:
+        """답변을 보내되, 독점 완화 넛지가 발동하면 스타일대로 처리(anti-fatigue).
 
-        스레드를 새로 만들었으면 그 Thread 를 반환(호출부가 거기로 답장), 아니면 None(원 채널 유지).
-        이미 스레드 안이거나 쿨다운 중이면 유도하지 않는다. 어떤 실패도 침묵 degrade.
+        - thread: 그 메시지에 공개 스레드를 만들어 답변을 거기로 보낸다(메인 채널 정리).
+        - divider: 답변은 채널에 그대로 두고, 뒤에 절취선(✂)을 한 번 남겨 '여기서 컷' 신호를 준다.
+        - off/미발동: 평소대로 원 채널에 답변만 보낸다.
         """
+        if not self._nudge_due(message):
+            await self._send_to(message.channel, reply)
+            return
+        if self._nudge_style == "thread":
+            thread = await self._open_thread(message)
+            await self._send_to(thread or message.channel, reply)
+        else:  # "divider": 채널 유지 + 절취선 한 번
+            await self._send_to(message.channel, reply)
+            await self._send_to(message.channel, _CUTLINE)
+
+    def _nudge_due(self, message) -> bool:
+        """이 답변이 독점 완화 넛지를 발동시켜야 하는지 판정하고 streak/쿨다운 상태를 갱신한다.
+
+        같은 유저가 한 채널에서 연속으로(streak) 봇을 부르면 _NUDGE_STREAK 에서 True. 이미 스레드
+        안이거나 쿨다운 중이거나 style=off 면 False. True 를 돌려줄 때 streak 리셋 + 쿨다운을 건다.
+        """
+        if self._nudge_style not in ("thread", "divider"):
+            return False
         channel = getattr(message, "channel", None)
         if channel is None or getattr(channel, "type", None) in _THREAD_CHANNEL_TYPES:
-            return None  # 채널 없음/이미 스레드 → 중첩 생성 안 함
+            return False  # 채널 없음/이미 스레드 → 넛지 안 함
         cid = str(getattr(channel, "id", ""))
         author_id = str(getattr(getattr(message, "author", None), "id", ""))
         # 연속 streak 갱신: 같은 유저면 +1, 다른 유저면 1로 리셋.
@@ -440,25 +462,28 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             streak = 1
             self._chan_addresser[cid] = author_id
         self._chan_streak[cid] = streak
-        if streak < _THREAD_NUDGE_STREAK:
-            return None
+        if streak < _NUDGE_STREAK:
+            return False
         now = time.monotonic()
-        until = self._thread_cooldown.get(cid)
+        until = self._nudge_cooldown.get(cid)
         if until is not None and now < until:
-            return None  # 최근에 이 채널에서 스레드를 만들었음 → 잠시 재생성 안 함
+            return False  # 최근에 이 채널에서 넛지함 → 잠시 재발동 안 함
+        self._chan_streak[cid] = 0  # 발동 → streak 리셋 + 쿨다운 시작(넛지 난사 방지)
+        self._nudge_cooldown[cid] = now + _NUDGE_COOLDOWN
+        return True
+
+    async def _open_thread(self, message):
+        """(thread 스타일) 메시지에 공개 스레드를 만들어 반환. 불가/실패면 None(원 채널 유지)."""
         if not hasattr(message, "create_thread"):
             return None
         try:
-            thread = await message.create_thread(
+            return await message.create_thread(
                 name=self._thread_name(getattr(message, "author", None)),
                 auto_archive_duration=_THREAD_AUTO_ARCHIVE_MIN,
             )
         except Exception:
             log.exception("스레드 생성 실패 (침묵 degrade)")
             return None
-        self._chan_streak[cid] = 0  # 생성 성공 → streak 리셋 + 쿨다운 시작(스레드 난사 방지)
-        self._thread_cooldown[cid] = now + _THREAD_NUDGE_COOLDOWN
-        return thread
 
     @staticmethod
     def _thread_name(author) -> str:
