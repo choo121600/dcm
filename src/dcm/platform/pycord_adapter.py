@@ -710,7 +710,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
 
     def _is_admin(self, ctx) -> bool:
         """InvokerCheck (ralplan S2): the SOLE authz boundary. The caller must hold the
-        configured ADMIN_ROLE (admin_role_id) — replaces the jiwoo Manage-Guild check.
+        configured ADMIN_ROLE (admin_role_id) — replaces the previous Manage-Guild check.
         Authz is bound to Discord role membership in code, never inferred from message text;
         @default_permissions is only a UI hint and is intentionally NOT relied on."""
         member = getattr(ctx, "author", None) or getattr(ctx, "user", None)
@@ -1703,6 +1703,11 @@ class _ConfirmView(discord.ui.View):
         self._factory = factory
         self._token = token
         self._authorized = authorized  # NL public message: re-check the button clicker's permission too (required)
+        # Localize the confirm button label at instantiation (after set_locale at boot);
+        # the class-body @button decorator froze the label to the import-time locale.
+        for _item in self.children:
+            if isinstance(_item, discord.ui.Button):
+                _item.label = t("adapter.confirm_button")
 
     async def _do_confirm(self, interaction) -> None:
         if self._authorized is not None and not self._authorized(interaction):

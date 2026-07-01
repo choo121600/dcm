@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..i18n import t
+from ..i18n import FALLBACK_LOCALE, t
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -190,7 +190,10 @@ def due_event_leads(evt: Event, now_utc: float) -> list[int]:
 def render_event_message(evt: Event, days: int) -> str:
     """Event countdown announcement text (discord-free). days = remaining days to display (D-DAY if ≤ 0)."""
     when = datetime.fromtimestamp(evt.event_at, KST)
-    dow = t("announcements.weekday_letters")[when.weekday()]
+    letters = t("announcements.weekday_letters")
+    if len(letters) < 7:  # a short/partial locale value would IndexError; use the ko reference (>=7)
+        letters = t("announcements.weekday_letters", locale=FALLBACK_LOCALE)
+    dow = letters[when.weekday()]
     tag = t("announcements.dday_label") if days <= 0 else t("announcements.dcount_label", days=days)
     lines = [
         t("announcements.title_line", tag=tag, title=evt.title),

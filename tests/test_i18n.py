@@ -83,3 +83,21 @@ def _ko_only_keys() -> list[str]:
 
 def _placeholders(value: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(value) if name}
+
+
+def test_weekday_letters_indexable_in_every_locale():
+    """render_event_message indexes weekday_letters[0..6]; every locale must supply >= 7 chars."""
+    for loc in i18n.available_locales():
+        letters = i18n.t("announcements.weekday_letters", locale=loc)
+        assert len(letters) >= 7, f"{loc}: weekday_letters must be >= 7 chars, got {letters!r}"
+
+
+def test_slash_command_descriptions_within_discord_limit():
+    """Discord caps slash command/option descriptions at 100 chars; overflow fails command sync."""
+    for loc in i18n.available_locales():
+        catalog = i18n._catalog(loc)
+        for key, value in catalog.items():
+            if (key.startswith("adapter.cmd_") and key.endswith("_desc")) or key.startswith(
+                "adapter.opt_"
+            ):
+                assert len(value) <= 100, f"{loc}:{key} is {len(value)} chars (Discord limit 100)"

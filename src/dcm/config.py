@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Authz: designated admin role id (ralplan S2). Members holding this role may
     # command privileged actions (channel/role/category/moderation). Will replace the
-    # jiwoo Manage-Guild check in S2. Required: unset raises a clear boot error.
+    # previous Manage-Guild check in S2. Required: unset raises a clear boot error.
     admin_role_id: int
 
     # Onboarding (ralplan S6) — all optional; onboarding activates only when set.

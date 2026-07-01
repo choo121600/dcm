@@ -29,9 +29,11 @@ optional: with no store/embedder wired in, the orchestrator still converses.
 ## 3. Chat-platform isolation boundary
 
 `platform/base.py` defines a `ChatPlatform` protocol and the `AuthContext` primitive; it is
-the **isolation seam**. `platform/pycord_adapter.py` is the *only* module that imports
+the **isolation seam**. `platform/pycord_adapter.py` is the primary module that imports
 `discord` — it translates gateway events into core calls and renders core results back into
-Discord messages, embeds, buttons, and slash commands.
+Discord messages, embeds, buttons, and slash commands. The one sanctioned exception is
+`leveling/service.py`, which builds rank/leaderboard embeds and reads `discord.Permissions`
+flags for auto-role safety; every other service/agent/memory module stays discord-free.
 
 ### 3.1 Server-management surface
 
@@ -144,7 +146,7 @@ credential carries a non-secret `label`; **the key value is never logged** — o
 The bot's user-facing strings are **externalized from source** into locale catalogs so the bot
 can speak a chosen language without code changes.
 
-- Catalogs: `src/dcm/i18n/locales/en.yaml` and `ko.yaml` (dotted keys, `{param}` placeholders).
+- Catalogs: per-namespace fragments under `src/dcm/i18n/locales/<locale>/*.yaml` (e.g. `ko/adapter.yaml`, `ko/orchestrator.yaml`), merged with an optional base `locales/<locale>.yaml` that holds only `_meta`. Dotted keys, `{param}` placeholders.
 - Lookup: `t("key", **params)` resolves against the active locale, falling back to the default.
 - Selection: the `BOT_LOCALE` setting (default `ko`, which preserves the original behavior).
 

@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/server-templates`, `deploy/README`.
 - `ARCHITECTURE.md` (+ `ARCHITECTURE.ko.md`) documenting the persona, memory,
   LLM, roadmap, and security model — replacing the previously dangling `DESIGN.md` references.
-- Internationalization (i18n) layer: `src/dcm/i18n/` with `locales/en.yaml` and
-  `locales/ko.yaml`, selectable via the `BOT_LOCALE` setting (default `ko`).
+- Internationalization (i18n) layer: `src/dcm/i18n/` with per-namespace catalogs under
+  `locales/<locale>/*.yaml` (ko/en), selectable via the `BOT_LOCALE` setting (default `ko`).
 - Open-source project scaffolding: `LICENSE` (MIT), `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, GitHub issue/PR templates, and a CI workflow (ruff + pytest).
 

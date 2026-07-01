@@ -3,6 +3,8 @@ name = "dcm"
 version = "0.1.0"
 description = "Discord Community Manager (dcm) — a 24/7 community-management bot that converses through a configurable persona (default 썩스가재), remembering and forgetting like a person"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Yeonguk" }]
 dependencies = [
     "py-cord>=2.6",
     "anthropic>=0.39",
