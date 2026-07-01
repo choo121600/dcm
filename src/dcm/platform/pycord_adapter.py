@@ -70,6 +70,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         onboarding_policy=None,
         guild_settings=None,
         announcements=None,
+        events=None,
     ) -> None:
         self._token = token
         self._bot_name = bot_name
@@ -88,6 +89,7 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._public_commands: list[str] = []  # 비가드 멤버 공개 명령 registry (leveling 표시)
         self._leveling = None  # LevelingService, register_leveling_commands 에서 주입
         self._announcements = announcements  # 예약 공지 저장소(AnnouncementStore); None이면 비활성
+        self._events = events  # 행사 카운트다운 공지 저장소(EventStore); None이면 비활성
         self._announce_task = None
 
         intents = discord.Intents.default()
@@ -115,29 +117,50 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         intents = self._client.intents
         log.info("privileged intent message_content=%s", intents.message_content)
         log.info("privileged intent members=%s", intents.members)
-        if self._announcements is not None and self._announce_task is None:
+        if (self._announcements is not None or self._events is not None) and self._announce_task is None:
             self._announce_task = asyncio.create_task(self._announce_loop())
             log.info("scheduled-announcement loop started")
 
     async def _announce_loop(self) -> None:
         """매분 예약 공지를 확인해 발화(예외 침묵 degrade). on_ready 에서 1회 시작."""
-        from ..service.announcements import is_due, minute_key
+        from ..service.announcements import (
+            due_event_leads,
+            is_due,
+            minute_key,
+            render_event_message,
+        )
 
         while True:
             try:
                 now = time.time()
-                for ann in self._announcements.list_enabled():
-                    if not is_due(ann, now):
-                        continue
-                    try:
-                        channel = self._client.get_channel(int(ann.channel_id))
-                        if channel is not None:
-                            await self._send_to(channel, ann.message)
-                        self._announcements.mark_fired(ann.id, minute_key(now))
-                        if ann.run_at is not None:  # 1회성 → 발화 후 비활성화
-                            self._announcements.set_enabled(ann.id, ann.guild_id, False)
-                    except Exception:  # noqa: BLE001 - 개별 공지 실패는 침묵, 루프 유지
-                        log.exception("announcement %s fire failed", ann.id)
+                if self._announcements is not None:
+                    for ann in self._announcements.list_enabled():
+                        if not is_due(ann, now):
+                            continue
+                        try:
+                            channel = self._client.get_channel(int(ann.channel_id))
+                            if channel is not None:
+                                await self._send_to(channel, ann.message)
+                            self._announcements.mark_fired(ann.id, minute_key(now))
+                            if ann.run_at is not None:  # 1회성 → 발화 후 비활성화
+                                self._announcements.set_enabled(ann.id, ann.guild_id, False)
+                        except Exception:  # noqa: BLE001 - 개별 공지 실패는 침묵, 루프 유지
+                            log.exception("announcement %s fire failed", ann.id)
+                if self._events is not None:
+                    for evt in self._events.list_enabled():
+                        try:
+                            leads = due_event_leads(evt, now)
+                            if leads:
+                                target = min(leads)  # 가장 임박한 리드만 발화(밀린 과거 리드는 스킵)
+                                channel = self._client.get_channel(int(evt.channel_id))
+                                if channel is not None:
+                                    await self._send_to(channel, render_event_message(evt, target))
+                                for lead in leads:  # 발화분 + 밀린 과거분 모두 마킹
+                                    self._events.mark_lead_fired(evt.id, lead)
+                            if now > evt.event_at + 3600:  # 행사 종료 → 비활성화
+                                self._events.set_enabled(evt.id, evt.guild_id, False)
+                        except Exception:  # noqa: BLE001 - 개별 행사 실패는 침묵, 루프 유지
+                            log.exception("event %s fire failed", evt.id)
             except Exception:  # noqa: BLE001
                 log.exception("announcement loop tick failed")
             await asyncio.sleep(60)
@@ -1124,6 +1147,104 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             ok = self._announcements.set_enabled(int(ann_id), self._ctx_guild(ctx), enabled)
             await ctx.respond(
                 f"{'✅' if ok else '해당 id 없음'}: #{int(ann_id)} {'켬' if enabled else '끔'}", ephemeral=True
+            )
+
+        @self.admin_command(
+            name="event-add",
+            description="행사 일정 카운트다운 공지 (D-30/14/7/3/1/DDAY 자동). 시각 KST.",
+        )
+        async def event_add(
+            ctx,
+            channel: discord.Option(discord.TextChannel, "공지 채널"),
+            title: str,
+            at: str,
+            leads: str = "",
+            note: str = "",
+            mention: str = "",
+        ):
+            if self._events is None:
+                await ctx.respond("행사 공지 저장소가 없어.", ephemeral=True)
+                return
+            import time as _t
+            from datetime import datetime
+
+            from ..service.announcements import EVENT_DEFAULT_LEADS, KST
+
+            try:
+                event_at = (
+                    datetime.strptime(at.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=KST).timestamp()
+                )
+            except ValueError:
+                await ctx.respond("시각 형식이 틀려. 예: 2026-07-15 19:00 (KST)", ephemeral=True)
+                return
+            try:
+                lead_days = (
+                    tuple(sorted({int(x) for x in leads.split(",") if x.strip()}, reverse=True))
+                    if leads.strip()
+                    else EVENT_DEFAULT_LEADS
+                )
+                if not lead_days or any(d < 0 for d in lead_days):
+                    raise ValueError
+            except ValueError:
+                await ctx.respond("리드데이 형식이 틀려. 예: 30,14,7,3 (일 단위, 0=당일)", ephemeral=True)
+                return
+            eid = self._events.add(
+                guild_id=self._ctx_guild(ctx),
+                channel_id=channel.id,
+                title=title.strip(),
+                event_at=event_at,
+                lead_days=lead_days,
+                message=note.strip() or None,
+                mention=mention.strip() or None,
+                created_by=self._actor(ctx)[1],
+            )
+            now = _t.time()
+            upcoming = [d for d in lead_days if event_at - d * 86400 > now]
+            tags = "/".join("D-DAY" if d == 0 else f"D-{d}" for d in upcoming) or "(모두 지남)"
+            await ctx.respond(
+                f"✅ 행사 #{eid} 등록: {channel.mention} · **{title.strip()}** · {at.strip()} (KST)\n"
+                f"예정 공지: {tags}",
+                ephemeral=True,
+            )
+
+        @self.admin_command(name="event-list", description="이 서버의 행사 일정 목록.")
+        async def event_list(ctx):
+            if self._events is None:
+                await ctx.respond("행사 공지 저장소가 없어.", ephemeral=True)
+                return
+            from datetime import datetime
+
+            from ..service.announcements import KST
+
+            items = self._events.list_for_guild(self._ctx_guild(ctx))
+            if not items:
+                await ctx.respond("등록된 행사가 없어.", ephemeral=True)
+                return
+            lines = []
+            for e in items:
+                when = datetime.fromtimestamp(e.event_at, KST).strftime("%Y-%m-%d %H:%M")
+                remaining = [d for d in e.lead_days if d not in e.fired_leads]
+                tags = "/".join("DDAY" if d == 0 else f"D-{d}" for d in remaining) or "완료"
+                state = "" if e.enabled else " ⏸️"
+                lines.append(f"#{e.id} · <#{e.channel_id}> · {e.title} · {when}{state} · 남은: {tags}")
+            await ctx.respond("\n".join(lines)[:1900], ephemeral=True)
+
+        @self.admin_command(name="event-remove", description="행사 일정 삭제 (id).")
+        async def event_remove(ctx, event_id: int):
+            if self._events is None:
+                await ctx.respond("행사 공지 저장소가 없어.", ephemeral=True)
+                return
+            ok = self._events.remove(int(event_id), self._ctx_guild(ctx))
+            await ctx.respond(f"{'🗑️ 삭제됨' if ok else '해당 id 없음'}: #{int(event_id)}", ephemeral=True)
+
+        @self.admin_command(name="event-toggle", description="행사 공지 켜기/끄기 (id, enabled).")
+        async def event_toggle(ctx, event_id: int, enabled: bool):
+            if self._events is None:
+                await ctx.respond("행사 공지 저장소가 없어.", ephemeral=True)
+                return
+            ok = self._events.set_enabled(int(event_id), self._ctx_guild(ctx), enabled)
+            await ctx.respond(
+                f"{'✅' if ok else '해당 id 없음'}: #{int(event_id)} {'켬' if enabled else '끔'}", ephemeral=True
             )
 
 

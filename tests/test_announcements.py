@@ -6,14 +6,19 @@ from datetime import datetime
 import pytest
 
 from dcm.service.announcements import (
+    EVENT_DEFAULT_LEADS,
     KST,
     Announcement,
     AnnouncementStore,
     CronError,
+    Event,
+    EventStore,
     cron_matches,
+    due_event_leads,
     is_due,
     minute_key,
     parse_cron,
+    render_event_message,
 )
 
 
@@ -142,3 +147,100 @@ def test_store_mark_fired_and_guild_scoped_remove(tmp_path):
     assert not st.remove(aid, "g2")  # 다른 길드는 못 지움
     assert len(st.list_for_guild("g1")) == 1
     st.close()
+
+
+# ── 행사 카운트다운 (Event) ─────────────────────────────────────────────
+DAY = 86400
+
+
+def _event(**kw) -> Event:
+    base = dict(
+        id=1,
+        guild_id="g1",
+        channel_id="c",
+        title="정기모임",
+        event_at=1_000_000.0,
+        lead_days=(30, 14, 7, 3, 1, 0),
+        fired_leads=frozenset(),
+        message=None,
+        mention=None,
+        enabled=True,
+        created_by=None,
+        created_at=0.0,
+    )
+    base.update(kw)
+    return Event(**base)
+
+
+def test_due_event_leads_fires_at_each_trigger():
+    at = 2_000_000_000.0
+    e = _event(event_at=at, lead_days=(14, 7, 3, 0), fired_leads=frozenset())
+    assert due_event_leads(e, at - 15 * DAY) == []  # 아직 D-14 전
+    assert due_event_leads(e, at - 14 * DAY) == [14]  # D-14 트리거 도달
+    assert due_event_leads(e, at - 3 * DAY) == [14, 7, 3]  # 아직 아무것도 안 쐈다면 누적
+    assert due_event_leads(e, at) == [14, 7, 3, 0]  # D-DAY
+
+
+def test_due_event_leads_skips_fired():
+    at = 2_000_000_000.0
+    e = _event(event_at=at, lead_days=(14, 7, 3, 0), fired_leads=frozenset({14, 7}))
+    assert due_event_leads(e, at - 3 * DAY) == [3]  # 이미 쏜 14/7 제외
+
+
+def test_due_event_leads_disabled_and_after_event():
+    at = 2_000_000_000.0
+    assert due_event_leads(_event(event_at=at, enabled=False), at) == []
+    e = _event(event_at=at, lead_days=(3, 0), fired_leads=frozenset())
+    assert due_event_leads(e, at + 2 * 3600) == []  # 행사+1h 유예 지나면 발화 안 함
+
+
+def test_event_store_prefires_missed_leads(tmp_path):
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now + 20 * DAY  # 20일 후 → D-30 트리거(이미 지남)는 미리 발화 처리
+    eid = st.add(guild_id="g1", channel_id="c", title="OT", event_at=at, now=now)
+    e = st.list_for_guild("g1")[0]
+    assert e.id == eid
+    assert 30 in e.fired_leads  # 놓친 D-30 은 prefire
+    assert 14 not in e.fired_leads  # 아직 미래인 D-14 는 발화 예정
+    assert due_event_leads(e, now) == []  # 등록 직후엔 아무것도 안 터짐
+    st.close()
+
+
+def test_event_store_crud_and_mark_lead_fired(tmp_path):
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now + 40 * DAY
+    eid = st.add(
+        guild_id="g1", channel_id="c", title="정기총회", event_at=at,
+        lead_days=(30, 7, 0), message="본관 3층", mention="@everyone", created_by="u1", now=now,
+    )
+    e = st.list_for_guild("g1")[0]
+    assert e.lead_days == (30, 7, 0) and e.message == "본관 3층" and e.mention == "@everyone"
+    assert e.fired_leads == frozenset()  # 40일 후라 아무 리드도 안 지남
+    st.mark_lead_fired(eid, 30)
+    assert 30 in st.list_for_guild("g1")[0].fired_leads
+    assert st.set_enabled(eid, "g1", False)
+    assert not st.list_enabled()
+    assert not st.remove(eid, "g2")  # 다른 길드는 못 지움
+    assert st.remove(eid, "g1")
+    assert st.list_for_guild("g1") == []
+    st.close()
+
+
+def test_event_store_default_leads(tmp_path):
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    st.add(guild_id="g1", channel_id="c", title="x", event_at=now + 365 * DAY, now=now)
+    assert st.list_for_guild("g1")[0].lead_days == EVENT_DEFAULT_LEADS
+    st.close()
+
+
+def test_render_event_message_tag_and_body():
+    at = datetime(2026, 7, 15, 19, 0, tzinfo=KST).timestamp()
+    e = _event(event_at=at, title="여름 OT", message="음성방 집합", mention="@everyone")
+    d14 = render_event_message(e, 14)
+    assert "D-14" in d14 and "여름 OT" in d14 and "2026-07-15" in d14
+    assert "음성방 집합" in d14 and d14.startswith("@everyone")
+    dday = render_event_message(_event(event_at=at, title="여름 OT"), 0)
+    assert "D-DAY" in dday and "@everyone" not in dday

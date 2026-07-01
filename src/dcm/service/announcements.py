@@ -32,6 +32,27 @@ CREATE TABLE IF NOT EXISTS scheduled_announcements (
 CREATE INDEX IF NOT EXISTS idx_ann_guild ON scheduled_announcements(guild_id);
 """
 
+_EVENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS scheduled_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id    TEXT NOT NULL,
+  channel_id  TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  event_at    REAL NOT NULL,             -- 행사 시각 epoch(UTC, KST 로 입력)
+  lead_days   TEXT NOT NULL,             -- 카운트다운 오프셋 CSV, 예 '30,14,7,3,1,0'
+  fired_leads TEXT NOT NULL DEFAULT '',  -- 이미 발화한 오프셋 CSV
+  message     TEXT,                      -- 선택 추가 문구
+  mention     TEXT,                      -- 선택 멘션(@everyone / <@&role>)
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_by  TEXT,
+  created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evt_guild ON scheduled_events(guild_id);
+"""
+
+# 행사 카운트다운 기본 리드데이(일): 한 달·2주·1주·3일·1일 전 + 당일.
+EVENT_DEFAULT_LEADS: tuple[int, ...] = (30, 14, 7, 3, 1, 0)
+
 _FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))  # 분 시 일 월 요일
 
 
@@ -128,6 +149,55 @@ def is_due(ann: Announcement, now_utc: float) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class Event:
+    """행사 일정 1건. event_at 시점 기준으로 lead_days(일)만큼 앞서 카운트다운 공지."""
+
+    id: int
+    guild_id: str
+    channel_id: str
+    title: str
+    event_at: float
+    lead_days: tuple[int, ...]
+    fired_leads: frozenset[int]
+    message: str | None
+    mention: str | None
+    enabled: bool
+    created_by: str | None
+    created_at: float
+
+
+def due_event_leads(evt: Event, now_utc: float) -> list[int]:
+    """지금 발화해야 할 리드 오프셋 목록(아직 안 쏜 것 중 트리거 도달, 행사 직후 1시간까지)."""
+    if not evt.enabled:
+        return []
+    out: list[int] = []
+    for lead in evt.lead_days:
+        if lead in evt.fired_leads:
+            continue
+        trigger = evt.event_at - lead * 86400
+        if trigger <= now_utc <= evt.event_at + 3600:
+            out.append(lead)
+    return out
+
+
+def render_event_message(evt: Event, lead: int) -> str:
+    """행사 카운트다운 공지 문구(discord-free). D-N / D-DAY 태그 + 일시 + 선택 문구/멘션."""
+    when = datetime.fromtimestamp(evt.event_at, KST)
+    dow = "월화수목금토일"[when.weekday()]
+    tag = "🔔 **D-DAY**" if lead == 0 else f"🔔 **D-{lead}**"
+    lines = [
+        f"{tag} · 📅 **{evt.title}**",
+        f"🗓️ {when.strftime('%Y-%m-%d')} ({dow}) {when.strftime('%H:%M')} (KST)",
+    ]
+    if evt.message:
+        lines.append(evt.message)
+    body = "\n".join(lines)
+    if evt.mention:
+        body = f"{evt.mention}\n{body}"
+    return body
+
+
 class AnnouncementStore:
     """예약 공지 SQLite 저장소 (memory.db 동일 파일 재사용 가능). discord-free."""
 
@@ -201,6 +271,123 @@ class AnnouncementStore:
     def mark_fired(self, ann_id: int, key: str) -> None:
         self._db.execute(
             "UPDATE scheduled_announcements SET last_fired_minute = ? WHERE id = ?", (key, int(ann_id))
+        )
+        self._db.commit()
+
+    def close(self) -> None:
+        self._db.close()
+
+
+class EventStore:
+    """행사 일정(카운트다운 공지) SQLite 저장소. memory.db 동일 파일 재사용. discord-free."""
+
+    def __init__(self, db_path: str) -> None:
+        path = Path(db_path)
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(str(db_path))
+        self._db.row_factory = sqlite3.Row
+        self._db.executescript(_EVENT_SCHEMA)
+        self._db.commit()
+
+    @staticmethod
+    def _ints(csv: str) -> list[int]:
+        return [int(x) for x in (csv or "").split(",") if x.strip() != ""]
+
+    def _row(self, r) -> Event:
+        return Event(
+            id=int(r["id"]),
+            guild_id=r["guild_id"],
+            channel_id=r["channel_id"],
+            title=r["title"],
+            event_at=float(r["event_at"]),
+            lead_days=tuple(self._ints(r["lead_days"])),
+            fired_leads=frozenset(self._ints(r["fired_leads"])),
+            message=r["message"],
+            mention=r["mention"],
+            enabled=bool(r["enabled"]),
+            created_by=r["created_by"],
+            created_at=r["created_at"],
+        )
+
+    def add(
+        self,
+        *,
+        guild_id,
+        channel_id,
+        title,
+        event_at: float,
+        lead_days=EVENT_DEFAULT_LEADS,
+        message=None,
+        mention=None,
+        created_by=None,
+        now=None,
+    ) -> int:
+        import time as _t
+
+        now_ts = now if now is not None else _t.time()
+        leads = tuple(sorted({int(x) for x in lead_days}, reverse=True))
+        if any(d < 0 for d in leads):
+            raise ValueError("lead_days 는 음수 불가")
+        # 이미 트리거가 지난(놓친) 오프셋은 미리 발화 처리 → 등록 즉시 과거 알림 폭주 방지.
+        prefired = sorted((d for d in leads if event_at - d * 86400 <= now_ts), reverse=True)
+        cur = self._db.execute(
+            "INSERT INTO scheduled_events "
+            "(guild_id, channel_id, title, event_at, lead_days, fired_leads, message, mention, "
+            " enabled, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                str(guild_id),
+                str(channel_id),
+                title,
+                float(event_at),
+                ",".join(str(d) for d in leads),
+                ",".join(str(d) for d in prefired),
+                message,
+                mention,
+                str(created_by) if created_by else None,
+                now_ts,
+            ),
+        )
+        self._db.commit()
+        return int(cur.lastrowid)
+
+    def list_for_guild(self, guild_id) -> list[Event]:
+        rows = self._db.execute(
+            "SELECT * FROM scheduled_events WHERE guild_id = ? ORDER BY event_at", (str(guild_id),)
+        ).fetchall()
+        return [self._row(r) for r in rows]
+
+    def list_enabled(self) -> list[Event]:
+        rows = self._db.execute("SELECT * FROM scheduled_events WHERE enabled = 1").fetchall()
+        return [self._row(r) for r in rows]
+
+    def remove(self, event_id: int, guild_id) -> bool:
+        cur = self._db.execute(
+            "DELETE FROM scheduled_events WHERE id = ? AND guild_id = ?", (int(event_id), str(guild_id))
+        )
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def set_enabled(self, event_id: int, guild_id, enabled: bool) -> bool:
+        cur = self._db.execute(
+            "UPDATE scheduled_events SET enabled = ? WHERE id = ? AND guild_id = ?",
+            (1 if enabled else 0, int(event_id), str(guild_id)),
+        )
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def mark_lead_fired(self, event_id: int, lead: int) -> None:
+        row = self._db.execute(
+            "SELECT fired_leads FROM scheduled_events WHERE id = ?", (int(event_id),)
+        ).fetchone()
+        if row is None:
+            return
+        fired = self._ints(row["fired_leads"])
+        if int(lead) not in fired:
+            fired.append(int(lead))
+        self._db.execute(
+            "UPDATE scheduled_events SET fired_leads = ? WHERE id = ?",
+            (",".join(str(d) for d in sorted(set(fired), reverse=True)), int(event_id)),
         )
         self._db.commit()
 

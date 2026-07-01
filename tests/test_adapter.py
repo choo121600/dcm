@@ -819,3 +819,93 @@ class TestAnnounceCommands:
         loop.run_until_complete(_find_cmd(a, "announce-remove").callback(_SettingsCtx(), ann_id=aid))
         assert store.list_for_guild(123) == []
         store.close()
+
+
+class TestEventCommands:
+    @staticmethod
+    def _adapter(tmp_path):
+        import types
+
+        from dcm.service.announcements import EventStore
+        from dcm.service.guild_admin import GuildAdminService
+
+        store = EventStore(str(tmp_path / "evt.db"))
+        a = PycordAdapter(
+            token="x",
+            bot_name="지우",
+            guild_id=123,
+            admin_role_id=0,
+            guild_settings=_FakeSettings(),
+            events=store,
+        )
+        a.register_admin_commands(GuildAdminService(a, a.pending))
+        return a, store, types.SimpleNamespace(id=555, mention="<#555>")
+
+    def test_event_add_default_countdown(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        ctx = _SettingsCtx()
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(ctx, channel=ch, title="여름 OT", at="2099-07-15 19:00")
+        )
+        items = store.list_for_guild(123)
+        assert len(items) == 1
+        assert items[0].title == "여름 OT" and items[0].channel_id == "555"
+        assert items[0].lead_days == (30, 14, 7, 3, 1, 0)  # 기본 카운트다운
+        store.close()
+
+    def test_event_add_custom_leads_and_note(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(
+                _SettingsCtx(), channel=ch, title="총회", at="2099-08-01 20:00",
+                leads="14,7,3", note="본관", mention="@everyone",
+            )
+        )
+        e = store.list_for_guild(123)[0]
+        assert e.lead_days == (14, 7, 3) and e.message == "본관" and e.mention == "@everyone"
+        store.close()
+
+    def test_event_add_bad_datetime_reports_error(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        ctx = _SettingsCtx()
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(ctx, channel=ch, title="x", at="nope")
+        )
+        assert store.list_for_guild(123) == []
+        assert any("시각" in r[0] for r in ctx.responses)
+        store.close()
+
+    def test_event_add_bad_leads_reports_error(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        ctx = _SettingsCtx()
+        loop.run_until_complete(
+            _find_cmd(a, "event-add").callback(ctx, channel=ch, title="x", at="2099-08-01 20:00", leads="a,b")
+        )
+        assert store.list_for_guild(123) == []
+        assert any("리드데이" in r[0] for r in ctx.responses)
+        store.close()
+
+    def test_event_list_and_remove(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        import time as _t
+
+        eid = store.add(
+            guild_id=123, channel_id=555, title="정기모임", event_at=_t.time() + 40 * 86400
+        )
+        ctx = _SettingsCtx()
+        loop.run_until_complete(_find_cmd(a, "event-list").callback(ctx))
+        assert any(f"#{eid}" in r[0] and "정기모임" in r[0] for r in ctx.responses)
+        loop.run_until_complete(_find_cmd(a, "event-remove").callback(_SettingsCtx(), event_id=eid))
+        assert store.list_for_guild(123) == []
+        store.close()
+
+    def test_event_toggle(self, loop, tmp_path):
+        a, store, ch = self._adapter(tmp_path)
+        import time as _t
+
+        eid = store.add(guild_id=123, channel_id=555, title="x", event_at=_t.time() + 40 * 86400)
+        loop.run_until_complete(
+            _find_cmd(a, "event-toggle").callback(_SettingsCtx(), event_id=eid, enabled=False)
+        )
+        assert store.list_enabled() == []
+        store.close()

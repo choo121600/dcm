@@ -19,7 +19,7 @@ from .agent.router import NLRouter
 from .scheduler import BackgroundJobs
 from .service.onboarding import OnboardingPolicy
 from .service.guild_settings import GuildSettings, GuildSettingsStore
-from .service.announcements import AnnouncementStore
+from .service.announcements import AnnouncementStore, EventStore
 
 log = logging.getLogger("dcm")
 
@@ -76,6 +76,9 @@ async def _run() -> None:
     # 예약 공지 저장소 (관리봇: 주기/1회성 공지). memory.db 동일 파일.
     announcements = AnnouncementStore(settings.memory_db)
 
+    # 행사 일정 카운트다운 공지 저장소 (D-30/14/7/3/1/DDAY 자동). memory.db 동일 파일.
+    events = EventStore(settings.memory_db)
+
     onboarding = OnboardingPolicy(
         settings=guild_settings,
         welcome_channel_id=settings.welcome_channel_id,
@@ -93,6 +96,7 @@ async def _run() -> None:
         onboarding_policy=onboarding,
         guild_settings=guild_settings,
         announcements=announcements,
+        events=events,
     )
 
     # Guild-management slash commands (ralplan S2).
@@ -148,6 +152,8 @@ async def _run() -> None:
     finally:
         # R2: writer 그레이스풀 종료(큐 drain 후 close). daily_usage 유실=bounded fail-open.
         leveling_store.close()
+        announcements.close()
+        events.close()
 
 
 def main() -> None:
