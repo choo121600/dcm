@@ -151,10 +151,11 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                         try:
                             leads = due_event_leads(evt, now)
                             if leads:
-                                target = min(leads)  # 가장 임박한 리드만 발화(밀린 과거 리드는 스킵)
+                                # 라벨은 실제 남은 일수 기준(늦게 등록/밀린 경우도 정확한 D-N 표시).
+                                days = max(0, round((evt.event_at - now) / 86400))
                                 channel = self._client.get_channel(int(evt.channel_id))
                                 if channel is not None:
-                                    await self._send_to(channel, render_event_message(evt, target))
+                                    await self._send_to(channel, render_event_message(evt, days))
                                 for lead in leads:  # 발화분 + 밀린 과거분 모두 마킹
                                     self._events.mark_lead_fired(evt.id, lead)
                             if now > evt.event_at + 3600:  # 행사 종료 → 비활성화
@@ -1200,12 +1201,17 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             )
             now = _t.time()
             upcoming = [d for d in lead_days if event_at - d * 86400 > now]
-            tags = "/".join("D-DAY" if d == 0 else f"D-{d}" for d in upcoming) or "(모두 지남)"
-            await ctx.respond(
-                f"✅ 행사 #{eid} 등록: {channel.mention} · **{title.strip()}** · {at.strip()} (KST)\n"
-                f"예정 공지: {tags}",
-                ephemeral=True,
-            )
+            up_tags = "/".join("D-DAY" if d == 0 else f"D-{d}" for d in upcoming)
+            head = f"✅ 행사 #{eid} 등록: {channel.mention} · **{title.strip()}** · {at.strip()} (KST)\n"
+            if event_at + 3600 < now:
+                plan = "⚠️ 이미 지난 행사라 공지는 나가지 않아 (기록만 됨)."
+            elif any(event_at - d * 86400 <= now for d in lead_days):
+                cur = max(0, round((event_at - now) / 86400))
+                cur_tag = "D-DAY" if cur == 0 else f"D-{cur}"
+                plan = f"지금 바로 **{cur_tag}** 공지 발송" + (f" → 이후 {up_tags}" if up_tags else "")
+            else:
+                plan = f"예정 공지: {up_tags}"
+            await ctx.respond(head + plan, ephemeral=True)
 
         @self.admin_command(name="event-list", description="이 서버의 행사 일정 목록.")
         async def event_list(ctx):

@@ -181,11 +181,11 @@ def due_event_leads(evt: Event, now_utc: float) -> list[int]:
     return out
 
 
-def render_event_message(evt: Event, lead: int) -> str:
-    """행사 카운트다운 공지 문구(discord-free). D-N / D-DAY 태그 + 일시 + 선택 문구/멘션."""
+def render_event_message(evt: Event, days: int) -> str:
+    """행사 카운트다운 공지 문구(discord-free). days=표시할 남은 일수(0 이하면 D-DAY)."""
     when = datetime.fromtimestamp(evt.event_at, KST)
     dow = "월화수목금토일"[when.weekday()]
-    tag = "🔔 **D-DAY**" if lead == 0 else f"🔔 **D-{lead}**"
+    tag = "🔔 **D-DAY**" if days <= 0 else f"🔔 **D-{days}**"
     lines = [
         f"{tag} · 📅 **{evt.title}**",
         f"🗓️ {when.strftime('%Y-%m-%d')} ({dow}) {when.strftime('%H:%M')} (KST)",
@@ -324,13 +324,29 @@ class EventStore:
         now=None,
     ) -> int:
         import time as _t
+        import math
 
         now_ts = now if now is not None else _t.time()
         leads = tuple(sorted({int(x) for x in lead_days}, reverse=True))
         if any(d < 0 for d in leads):
             raise ValueError("lead_days 는 음수 불가")
-        # 이미 트리거가 지난(놓친) 오프셋은 미리 발화 처리 → 등록 즉시 과거 알림 폭주 방지.
-        prefired = sorted((d for d in leads if event_at - d * 86400 <= now_ts), reverse=True)
+        # 등록 시점 처리(핵심):
+        #  - 이미 (1시간 유예까지) 끝난 행사면 전부 스킵, 아무것도 발화 안 함.
+        #  - "늦게 등록"(첫 마일스톤이 이미 지남)이면 지금 남은 일수(D-cur)를 즉시 1회 공지하고,
+        #    그보다 오래된 마일스톤은 스킵 → 이후 남은 마일스톤만 순서대로.
+        #  - 아직 첫 마일스톤 전이면 즉시 공지 없이 예정된 마일스톤대로.
+        effective = leads
+        if event_at + 3600 < now_ts:
+            prefired = sorted(leads, reverse=True)
+        elif leads and now_ts >= event_at - max(leads) * 86400:
+            remaining = max(0.0, (event_at - now_ts) / 86400.0)
+            cur_days = round(remaining)  # 라벨용 남은 일수
+            fire_lead = math.ceil(remaining)  # 트리거를 now 이하로 → 즉시 발화 보장
+            effective = tuple(sorted(set(leads) | {fire_lead}, reverse=True))
+            # cur 이상(현재·과거) 마일스톤은 스킵하되 즉시발화용 fire_lead 만 남김
+            prefired = sorted((d for d in effective if d >= cur_days and d != fire_lead), reverse=True)
+        else:
+            prefired = []
         cur = self._db.execute(
             "INSERT INTO scheduled_events "
             "(guild_id, channel_id, title, event_at, lead_days, fired_leads, message, mention, "
@@ -340,7 +356,7 @@ class EventStore:
                 str(channel_id),
                 title,
                 float(event_at),
-                ",".join(str(d) for d in leads),
+                ",".join(str(d) for d in effective),
                 ",".join(str(d) for d in prefired),
                 message,
                 mention,

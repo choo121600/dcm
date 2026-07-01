@@ -194,17 +194,65 @@ def test_due_event_leads_disabled_and_after_event():
     assert due_event_leads(e, at + 2 * 3600) == []  # 행사+1h 유예 지나면 발화 안 함
 
 
-def test_event_store_prefires_missed_leads(tmp_path):
+def test_event_store_late_registration_fires_current_status(tmp_path):
+    # 20일 남은 시점 등록 → 지난 D-30 은 스킵, 지금 상태(D-20)를 즉시 1회 발화용으로 남김.
     st = EventStore(str(tmp_path / "e.db"))
     now = 1_000_000_000.0
-    at = now + 20 * DAY  # 20일 후 → D-30 트리거(이미 지남)는 미리 발화 처리
+    at = now + 20 * DAY
     eid = st.add(guild_id="g1", channel_id="c", title="OT", event_at=at, now=now)
     e = st.list_for_guild("g1")[0]
     assert e.id == eid
-    assert 30 in e.fired_leads  # 놓친 D-30 은 prefire
-    assert 14 not in e.fired_leads  # 아직 미래인 D-14 는 발화 예정
-    assert due_event_leads(e, now) == []  # 등록 직후엔 아무것도 안 터짐
-    st.close()
+    assert 30 in e.fired_leads  # 지난 D-30 마일스톤은 스킵
+    assert due_event_leads(e, now) == [20]  # 등록 직후 틱에 지금 상태(D-20) 즉시 1회
+    assert 20 not in e.fired_leads and 14 not in e.fired_leads
+
+
+def test_event_store_register_3days_before(tmp_path):
+    # 사용자 시나리오: 행사 3일 전에 등록 → D-3 즉시, 이후 D-1/D-DAY.
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now + 3 * DAY
+    st.add(guild_id="g1", channel_id="c", title="OT", event_at=at, now=now)
+    e = st.list_for_guild("g1")[0]
+    assert due_event_leads(e, now) == [3]  # 지금 D-3 즉시 발화
+    assert sorted(d for d in e.lead_days if d not in e.fired_leads) == [0, 1, 3]  # 이후 D-1/D-DAY
+    assert {30, 14, 7} <= e.fired_leads  # 지난 마일스톤 스킵
+
+
+def test_event_store_register_just_after_milestone_no_double(tmp_path):
+    # 행사 시각이 저녁인데 D-3 트리거(저녁) 살짝 지나서 등록 → D-3 한 번만(중복 없음).
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now + 3 * DAY - 2 * 3600  # D-3 트리거를 2시간 지난 시점
+    st.add(guild_id="g1", channel_id="c", title="OT", event_at=at, now=now)
+    e = st.list_for_guild("g1")[0]
+    # 즉시 발화 1건만, 나머지 pending 은 D-1/D-DAY (D-3 중복 발화 없음)
+    due_now = due_event_leads(e, now)
+    assert len(due_now) == 1
+    pending = sorted(d for d in e.lead_days if d not in e.fired_leads)
+    assert pending == [0, 1, due_now[0]] and due_now[0] not in (0, 1)
+
+
+def test_event_store_advance_registration_no_immediate(tmp_path):
+    # 첫 마일스톤(D-30) 전에 등록 → 즉시 공지 없음, 마일스톤대로.
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now + 45 * DAY
+    st.add(guild_id="g1", channel_id="c", title="OT", event_at=at, now=now)
+    e = st.list_for_guild("g1")[0]
+    assert e.fired_leads == frozenset()  # 아무것도 스킵/발화 안 함
+    assert due_event_leads(e, now) == []  # 즉시 발화 없음
+
+
+def test_event_store_past_event_skips_all(tmp_path):
+    # 행사가 이미 (유예 넘어) 지난 뒤 등록 → 전부 스킵, 발화 없음.
+    st = EventStore(str(tmp_path / "e.db"))
+    now = 1_000_000_000.0
+    at = now - 2 * DAY
+    st.add(guild_id="g1", channel_id="c", title="지난행사", event_at=at, now=now)
+    e = st.list_for_guild("g1")[0]
+    assert e.fired_leads == frozenset(e.lead_days)  # 전부 prefire
+    assert due_event_leads(e, now) == []
 
 
 def test_event_store_crud_and_mark_lead_fired(tmp_path):
