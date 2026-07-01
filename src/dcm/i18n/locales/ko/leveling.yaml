@@ -1,0 +1,12 @@
+leveling:
+  # rank_embed — 개인 활동 레벨 카드.
+  rank_title: "{display_name} 님의 활동 레벨"
+  field_level: "레벨"
+  field_total_xp: "총 XP"
+  field_next_level: "다음 레벨까지"
+  next_level_value: "{remaining} XP ({percent}%)"
+
+  # leaderboard_embed — 활동 리더보드.
+  leaderboard_title: "🏆 활동 리더보드"
+  leaderboard_empty: "아직 활동 기록이 없어요. 채팅하면 XP가 쌓여요!"
+  leaderboard_row: "**{rank}.** {name} — Lv {level} ({xp} XP)"

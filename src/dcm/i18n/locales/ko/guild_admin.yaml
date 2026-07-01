@@ -1,0 +1,66 @@
+guild_admin:
+  # Confirmation gate + op-result detail strings (shown to the operator who ran the command).
+  confirm_needed: "확인 필요(고위험): {summary}"
+  confirm_token_invalid: "확인 토큰이 유효하지 않거나 만료됨: {summary}"
+
+  # Op summaries (embedded into the confirmation gate detail).
+  summary_delete_channel: "채널 삭제 {channel_id}"
+  summary_create_role: "역할 생성 '{name}' (관리권한 포함)"
+  summary_assign_role: "역할 부여 {role_id} → 멤버 {user_id} (관리권한 역할)"
+  summary_set_role_permissions: "역할 권한 설정 {role_id} (관리권한 포함)"
+  summary_create_project: "프로젝트 세트 '{name}' 생성"
+  summary_kick: "멤버 추방: {user_id}"
+  summary_ban: "멤버 차단(밴): {user_id}"
+  summary_purge: "채널 메시지 삭제: {channel_id} ({count}건)"
+
+  # Op results.
+  category_created: "카테고리 생성됨: {name} ({cid})"
+  channel_created: "{kind} 채널 생성됨: {name} ({cid})"
+  channel_edited: "채널 수정됨: {channel_id}"
+  channel_deleted: "채널 삭제됨: {channel_id}"
+  role_created: "역할 생성됨: {name} ({rid})"
+  role_assigned: "역할 부여됨: {role_id} → {user_id}"
+  role_removed: "역할 회수됨: {role_id} → {user_id}"
+  role_permissions_set: "역할 권한 설정됨: {role_id}"
+  member_kicked: "멤버 추방됨: {user_id}"
+  member_banned: "멤버 차단됨: {user_id}"
+  member_timed_out: "멤버 타임아웃 적용됨: {user_id} ({duration}초)"
+  messages_purged: "메시지 {deleted}건 삭제됨 (채널 {channel_id})"
+
+  # Project set.
+  project_needs_channel: "프로젝트 세트에는 채널이 최소 1개 필요해."
+  project_partial_fail: "프로젝트 세트 '{name}' 부분 실패 — 생성됨: {created}; 중단: {exc}. 자동 롤백 없음(생성분은 수동 정리 필요)."
+  project_created: "프로젝트 세트 '{name}' 생성 완료 — 접근역할 + 카테고리 + 채널 {count}개. {created}"
+
+  # Purge (message bulk-delete) limit.
+  purge_over_limit: "메시지 삭제 상한 초과: Discord 벌크 삭제는 한 번에 최대 100건까지 가능해 (요청: {count}건)."
+
+  # Template apply.
+  template_token_invalid: "템플릿 확인 토큰이 유효하지 않거나 만료됐어. 파일을 다시 올려줘."
+  template_file_needed: "템플릿 파일이 필요해 (.yaml/.yml/.json)."
+  template_error: "템플릿 오류: {exc}"
+  created_role: "역할 {name}"
+  created_category: "카테고리 {name}"
+  created_channel: "{kind} 채널 {name}"
+  template_partial_fail: "템플릿 적용 부분 실패 — 생성됨: {created}; 중단: {exc}. 자동 롤백 없음."
+  template_no_change: "템플릿 적용 완료 — 변경 없음(모두 이미 존재)."
+  template_applied: "템플릿 적용 완료 ✅ — {created}"
+
+  # Cleanup (archive / purge).
+  archive_token_invalid: "아카이브 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘."
+  archive_none: "아카이브로 옮길 비활성 채널이 없어 ✅"
+  purge_token_invalid: "퍼지 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘."
+  purge_none: "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅"
+  archive_moved: "채널 {count}개 아카이브로 이동(숨김)"
+  archive_done: "아카이브 완료 ✅ — {parts}"
+  purged_channels: "채널 {count}개 삭제"
+  purged_roles: "역할 {count}개 삭제"
+  purged_categories: "빈 카테고리 {count}개 삭제"
+  purge_done: "퍼지 완료 ✅ — {parts}"
+
+  # Shared labels.
+  none_label: "없음"
+  fail_channel: "채널 {name}: {exc}"
+  fail_role: "역할 {name}: {exc}"
+  fail_category: "카테고리 {name}: {exc}"
+  fail_count: "실패 {count}건: {details}"

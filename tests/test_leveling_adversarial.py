@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dcm.leveling import scoring
 from dcm.leveling.store import LevelingStore
 
-
 # ── scoring: 거대 XP 유한성·단조 ────────────────────────────────────────────────
 
 def test_level_large_xp_finite_and_monotonic():

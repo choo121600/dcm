@@ -1,0 +1,18 @@
+announcements:
+  # CronError / ValueError messages.
+  err_empty_field: "Empty field item: {field!r}"
+  err_bad_step: "Invalid step: {part!r}"
+  err_bad_range: "Invalid range: {part!r}"
+  err_bad_value: "Invalid value: {part!r}"
+  err_out_of_range: "Out of range: {part!r} (allowed {lo}-{hi})"
+  err_cron_fields: "cron must have 5 fields: 'minute hour day month weekday' (e.g. '0 9 * * 1')"
+  err_cron_or_runat: "Either cron or run_at is required"
+  err_lead_negative: "lead_days cannot be negative"
+
+  # Event countdown message (render_event_message).
+  # Weekday single-letter labels — must be 7 chars so [weekday] indexing works.
+  weekday_letters: "MTWTFSS"
+  dday_label: "🔔 **D-DAY**"
+  dcount_label: "🔔 **D-{days}**"
+  title_line: "{tag} · 📅 **{title}**"
+  date_label: "🗓️ {date} ({dow}) {time} (KST)"

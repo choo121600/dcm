@@ -1,39 +1,45 @@
-"""비활성 채널 아카이브 + 고아 역할 삭제 '계획' (discord-free, 순수 데이터).
+"""'Plan' for archiving inactive channels + deleting orphan roles (discord-free, pure data).
 
-2단계 수명주기:
-  1) 아카이브: 비활성 텍스트 채널을 '📦 아카이브' 카테고리로 이동(+멤버에게 숨김). 되돌릴 수 있음.
-  2) 퍼지  : '📦 아카이브' 안의 모든 채널을 삭제 + 고아 역할 삭제. 되돌릴 수 없음.
-어댑터가 넘긴 채널/역할 dict 위에서 *무엇을* 할지만 결정하고, 실제 디스코드 호출(이동/생성/
-삭제/권한)은 GuildAdminService 가 한다. 순수 함수라 단위 테스트가 쉽다.
+Two-stage lifecycle:
+  1) Archive: move inactive text channels into the '📦 아카이브' category (+ hide from members). Reversible.
+  2) Purge  : delete every channel inside '📦 아카이브' + delete orphan roles. Irreversible.
+Only decides *what* to do on top of the channel/role dicts the adapter passes in; the actual Discord
+calls (move/create/delete/permissions) are done by GuildAdminService. Being pure functions, it is easy
+to unit-test.
 
-설계 결정(사용자 합의):
-- 비활성 기준 = 마지막 메시지 경과일 ≥ N일(기본 90). 메시지 없는 채널도 비활성으로 본다.
-- 아카이브 1차 대상은 텍스트 채널(type 0). 음성(2)/스테이지(13)는 죽은 텍스트와 '이름쌍'
-  (예: chess-engine-algo-채팅 ↔ CHESS-ENGINE-ALGO-음성)일 때 동반 아카이브 — 텍스트 짝이
-  없는 일반 음성 라운지는 통화-전용 활성일 수 있어 건드리지 않는다. 포럼(15)/공지(5) 제외.
-- 이미 '📦 아카이브' 안에 있는 채널은 퍼지(삭제) 대상으로 분류(다시 아카이브하지 않음).
-- 역할은 멤버 0명 + 봇/연동 아님 + @everyone/관리역할/보호역할 아님 + 살아있는(아카이브/퍼지
-  대상이 아닌) 채널이 안 쓰는 것만 삭제 후보. 역할 삭제는 퍼지 단계에서만 일어난다.
+Design decisions (agreed with the user):
+- Inactivity criterion = days since last message ≥ N days (default 90). A channel with no messages is
+  also treated as inactive.
+- The primary archive targets are text channels (type 0). Voice (2)/stage (13) are co-archived only
+  when they form a 'name pair' with a dead text channel
+  (e.g. chess-engine-algo-채팅 ↔ CHESS-ENGINE-ALGO-음성) — a plain voice lounge with no text
+  counterpart may be call-only-active, so it is left untouched. Forum (15)/announcement (5) excluded.
+- Channels already inside '📦 아카이브' are classified as purge (delete) targets (not archived again).
+- A role is a deletion candidate only if it has 0 members + is not a bot/integration + is not
+  @everyone/an admin role/a protected role + is unused by any live (non-archive/purge) channel. Role
+  deletion happens only in the purge stage.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..i18n import t
+
 DISCORD_EPOCH_MS = 1420070400000
 DEFAULT_INACTIVE_DAYS = 90
 
-# 아카이브 카테고리 이름. 50개 초과 시 "📦 아카이브 2", "📦 아카이브 3" … 로 분할(카테고리당 한도).
+# Archive category name. When it exceeds 50, split into "📦 아카이브 2", "📦 아카이브 3" … (per-category limit).
 ARCHIVE_CATEGORY_BASE = "📦 아카이브"
 MAX_CHANNELS_PER_CATEGORY = 50
 
-# 아카이브 후보로 고려하는 채널 타입: 텍스트만.
+# Channel types considered as archive candidates: text only.
 ARCHIVABLE_TYPES = frozenset({0})
 
-# 동반 아카이브 타입: 음성(2)/스테이지(13). 죽은 텍스트와 '이름쌍'일 때만 함께 아카이브한다.
+# Co-archive types: voice (2)/stage (13). Archived together only when they form a 'name pair' with a dead text channel.
 CO_ARCHIVE_TYPES = frozenset({2, 13})
 
-# 아카이브에서 항상 제외할 채널 이름 조각(운영/안내/입구 등). 대소문자 무시 부분일치 — 드라이런에서
-# 운영자가 최종 검토하므로 보수적으로 넓게 잡는다.
+# Channel-name fragments always excluded from archiving (ops/notice/entry, etc.). Case-insensitive
+# substring match — since the operator reviews the dry-run, we cast a conservatively wide net.
 PROTECTED_NAME_PARTS = (
     "공지", "announce", "입구", "welcome", "환영", "규칙", "rule",
     "역할", "role", "관리", "운영", "moderator", "admin", "봇", "bot", "보관", "archive", "아카이브",
@@ -44,7 +50,7 @@ PROTECTED_NAME_PARTS = (
 class ChannelAction:
     id: int
     name: str
-    age_days: float | None  # None = 메시지 흔적 없음
+    age_days: float | None  # None = no message trace
 
 
 @dataclass(frozen=True)
@@ -57,10 +63,10 @@ class RoleAction:
 @dataclass
 class CleanupPlan:
     inactive_days: int
-    archive_channels: list[ChannelAction] = field(default_factory=list)  # → 아카이브로 이동(되돌림 가능)
-    purge_channels: list[ChannelAction] = field(default_factory=list)  # 이미 아카이브에 있음 → 삭제(영구)
-    delete_roles: list[RoleAction] = field(default_factory=list)  # 고아 역할 → 삭제(영구)
-    orphan_categories: list[ChannelAction] = field(default_factory=list)  # 빈(고아) 카테고리 → 삭제(영구)
+    archive_channels: list[ChannelAction] = field(default_factory=list)  # → move to archive (reversible)
+    purge_channels: list[ChannelAction] = field(default_factory=list)  # already in archive → delete (permanent)
+    delete_roles: list[RoleAction] = field(default_factory=list)  # orphan roles → delete (permanent)
+    orphan_categories: list[ChannelAction] = field(default_factory=list)  # empty (orphan) categories → delete (permanent)
     skipped_protected: list[str] = field(default_factory=list)
 
     @property
@@ -70,72 +76,72 @@ class CleanupPlan:
         )
 
     def _chan_line(self, c: ChannelAction) -> str:
-        age = "메시지 없음" if c.age_days is None else f"{c.age_days:.0f}일 전"
-        return f"  • #{c.name} (마지막 활동 {age})"
+        age = t("cleanup.no_messages") if c.age_days is None else t("cleanup.days_ago", days=c.age_days)
+        return t("cleanup.chan_line", name=c.name, age=age)
 
     def summary(self) -> str:
-        """리포트용 전체 요약(아카이브 예정 + 퍼지 예정 + 역할)."""
-        lines = [f"🧹 정리 현황 (비활성 기준 {self.inactive_days}일)"]
-        lines.append(f"\n📦 아카이브로 옮길 비활성 채널: {len(self.archive_channels)}개")
+        """Full summary for the report (to-archive + to-purge + roles)."""
+        lines = [t("cleanup.report_header", days=self.inactive_days)]
+        lines.append(t("cleanup.report_archive_section", count=len(self.archive_channels)))
         for c in self.archive_channels[:20]:
             lines.append(self._chan_line(c))
         if len(self.archive_channels) > 20:
-            lines.append(f"  …외 {len(self.archive_channels) - 20}개")
-        lines.append(f"\n🔥 이미 아카이브에 있어 퍼지(삭제)될 채널: {len(self.purge_channels)}개")
+            lines.append(t("cleanup.report_more", count=len(self.archive_channels) - 20))
+        lines.append(t("cleanup.report_purge_section", count=len(self.purge_channels)))
         for c in self.purge_channels[:20]:
-            lines.append(f"  • #{c.name}")
+            lines.append(t("cleanup.chan_bullet", name=c.name))
         if len(self.purge_channels) > 20:
-            lines.append(f"  …외 {len(self.purge_channels) - 20}개")
-        lines.append(f"\n🗑️ 퍼지 때 삭제될 고아 역할: {len(self.delete_roles)}개")
+            lines.append(t("cleanup.report_more", count=len(self.purge_channels) - 20))
+        lines.append(t("cleanup.report_roles_section", count=len(self.delete_roles)))
         for r in self.delete_roles[:20]:
-            lines.append(f"  • @{r.name} ({r.reason})")
+            lines.append(t("cleanup.role_bullet", name=r.name, reason=r.reason))
         if len(self.delete_roles) > 20:
-            lines.append(f"  …외 {len(self.delete_roles) - 20}개")
-        lines.append(f"\n🗂️ 퍼지 때 삭제될 빈 카테고리: {len(self.orphan_categories)}개")
+            lines.append(t("cleanup.report_more", count=len(self.delete_roles) - 20))
+        lines.append(t("cleanup.report_categories_section", count=len(self.orphan_categories)))
         for c in self.orphan_categories[:20]:
-            lines.append(f"  • {c.name}")
+            lines.append(t("cleanup.cat_bullet", name=c.name))
         if len(self.orphan_categories) > 20:
-            lines.append(f"  …외 {len(self.orphan_categories) - 20}개")
-        lines.append("\n명령: /cleanup-archive (이동·되돌림 가능) → /cleanup-purge (영구 삭제)")
+            lines.append(t("cleanup.report_more", count=len(self.orphan_categories) - 20))
+        lines.append(t("cleanup.report_commands"))
         return "\n".join(lines)
 
     def archive_summary(self) -> str:
         if not self.archive_channels:
-            return "아카이브로 옮길 비활성 채널이 없어 ✅"
-        lines = [f"📦 아카이브로 옮길 채널 {len(self.archive_channels)}개 (멤버에게 숨김, 되돌림 가능):"]
+            return t("cleanup.archive_none")
+        lines = [t("cleanup.archive_header", count=len(self.archive_channels))]
         for c in self.archive_channels[:30]:
             lines.append(self._chan_line(c))
         if len(self.archive_channels) > 30:
-            lines.append(f"  …외 {len(self.archive_channels) - 30}개")
+            lines.append(t("cleanup.report_more", count=len(self.archive_channels) - 30))
         return "\n".join(lines)
 
     def purge_summary(self) -> str:
         if not self.purge_channels and not self.delete_roles and not self.orphan_categories:
-            return "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅"
-        lines = ["🔥 영구 삭제 (되돌릴 수 없음):"]
+            return t("cleanup.purge_none")
+        lines = [t("cleanup.purge_header")]
         if self.purge_channels:
-            lines.append(f"\n아카이브 채널 {len(self.purge_channels)}개:")
+            lines.append(t("cleanup.purge_channels_section", count=len(self.purge_channels)))
             for c in self.purge_channels[:30]:
-                lines.append(f"  • #{c.name}")
+                lines.append(t("cleanup.chan_bullet", name=c.name))
             if len(self.purge_channels) > 30:
-                lines.append(f"  …외 {len(self.purge_channels) - 30}개")
+                lines.append(t("cleanup.report_more", count=len(self.purge_channels) - 30))
         if self.delete_roles:
-            lines.append(f"\n고아 역할 {len(self.delete_roles)}개:")
+            lines.append(t("cleanup.purge_roles_section", count=len(self.delete_roles)))
             for r in self.delete_roles[:30]:
-                lines.append(f"  • @{r.name} ({r.reason})")
+                lines.append(t("cleanup.role_bullet", name=r.name, reason=r.reason))
             if len(self.delete_roles) > 30:
-                lines.append(f"  …외 {len(self.delete_roles) - 30}개")
+                lines.append(t("cleanup.report_more", count=len(self.delete_roles) - 30))
         if self.orphan_categories:
-            lines.append(f"\n빈 카테고리 {len(self.orphan_categories)}개:")
+            lines.append(t("cleanup.purge_categories_section", count=len(self.orphan_categories)))
             for c in self.orphan_categories[:30]:
-                lines.append(f"  • {c.name}")
+                lines.append(t("cleanup.cat_bullet", name=c.name))
             if len(self.orphan_categories) > 30:
-                lines.append(f"  …외 {len(self.orphan_categories) - 30}개")
+                lines.append(t("cleanup.report_more", count=len(self.orphan_categories) - 30))
         return "\n".join(lines)
 
 
 def age_days(last_message_id, now_ms: float) -> float | None:
-    """Discord 스노플레이크(last_message_id)에서 마지막 활동 경과일. 없으면 None."""
+    """Days since last activity from the Discord snowflake (last_message_id). None if absent."""
     if not last_message_id:
         return None
     ts = (int(last_message_id) >> 22) + DISCORD_EPOCH_MS
@@ -147,26 +153,26 @@ def _is_protected(name: str, protected_parts) -> bool:
     return any(p.lower() in low for p in protected_parts)
 
 
-# 기수(코호트) 역할 판별용 계절 키워드 — 이 단어가 이름에 있으면 기수로 보고 보존.
+# Season keywords for detecting cohort roles — if a name contains one of these, treat it as a cohort and preserve.
 SEASON_KEYWORDS = ("summer", "winter", "spring", "fall", "autumn", "여름", "겨울", "봄", "가을")
 
 
 def _is_cohort(name: str) -> bool:
-    """엄브렐러 기수만 True(보존): 계절 키워드 + 연도/구분자만으로 된 이름(예: '2023 Summer',
-    '25-SUMMER'). 계절 뒤에 프로젝트명이 붙은 세부(25-SUMMER-DJANGO 등)는 25-SUMMER로
-    합쳐지므로 기수 아님 → 정리 대상."""
+    """True only for umbrella cohorts (preserve): names made up of a season keyword + year/separators
+    only (e.g. '2023 Summer', '25-SUMMER'). A detail with a project name after the season
+    (e.g. 25-SUMMER-DJANGO) is merged into 25-SUMMER, so it is not a cohort → a cleanup target."""
     low = (name or "").lower()
     if not any(k in low for k in SEASON_KEYWORDS):
         return False
     rest = low
     for k in SEASON_KEYWORDS:
         rest = rest.replace(k, "")
-    # 계절을 뺀 뒤 남는 글자(프로젝트명)가 없으면 엄브렐러 기수.
+    # If no letters (project name) remain after removing the season, it is an umbrella cohort.
     return not any(ch.isalpha() for ch in rest)
 
 
 def _base_name(name: str) -> str:
-    """채널 이름에서 종류 접미사(음성/voice/채팅/chat/채널)를 떼고 소문자화 — 텍스트↔음성 이름쌍 매칭용."""
+    """Strip the kind suffix (음성/voice/채팅/chat/채널) from a channel name and lowercase it — for text↔voice name-pair matching."""
     s = (name or "").lower().strip()
     for suf in ("-음성", " 음성", "음성", "-voice", "voice", "-채팅", " 채팅", "채팅", "-chat", "chat", "-채널", "채널"):
         if s.endswith(suf):
@@ -176,7 +182,7 @@ def _base_name(name: str) -> str:
 
 
 def find_archive_category_ids(channels: list[dict]) -> set[int]:
-    """'📦 아카이브'(및 분할본) 카테고리의 id 집합."""
+    """Set of ids for the '📦 아카이브' category (and its splits)."""
     return {
         int(c["id"])
         for c in channels
@@ -195,11 +201,11 @@ def plan_cleanup(
     protected_parts=PROTECTED_NAME_PARTS,
     protected_role_ids=(),
 ) -> CleanupPlan:
-    """채널/역할 dict 위에서 정리 계획을 만든다(순수 함수, 디스코드 호출 없음).
+    """Build a cleanup plan on top of the channel/role dicts (pure function, no Discord calls).
 
-    채널 dict 기대 키: id, name, type(int), parent_id(str|None), last_message_id(str|None),
-                       overwrite_role_ids(list[str]).
-    역할 dict 기대 키: id, name, member_count(int), managed(bool), is_default(bool).
+    Expected channel dict keys: id, name, type(int), parent_id(str|None), last_message_id(str|None),
+                                overwrite_role_ids(list[str]).
+    Expected role dict keys: id, name, member_count(int), managed(bool), is_default(bool).
     """
     plan = CleanupPlan(inactive_days=inactive_days)
     archive_cat_ids = find_archive_category_ids(channels)
@@ -207,7 +213,7 @@ def plan_cleanup(
     for c in channels:
         cid = int(c["id"])
         parent = c.get("parent_id")
-        # 이미 아카이브 안 → 퍼지(삭제) 대상; 다시 아카이브하지 않음.
+        # Already inside archive → purge (delete) target; not archived again.
         if parent and int(parent) in archive_cat_ids:
             plan.purge_channels.append(
                 ChannelAction(cid, c.get("name", ""), age_days(c.get("last_message_id"), now_ms))
@@ -225,9 +231,10 @@ def plan_cleanup(
         if a is None or a >= inactive_days:
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
-    # 음성/스테이지도 아카이브 — 최근(<기준) 활동만 아니면: (1) 음성-텍스트챗이 오래됨,
-    # (2) 죽은 텍스트와 이름쌍, 또는 (3) 최근 활동 채널이 하나도 없는 '죽은 카테고리'에 속함
-    # (텍스트 없는 토픽 라운지 포함). 활성 채널이 있는 카테고리의 텍스트-없는 음성은 보존.
+    # Archive voice/stage too — unless there is recent (< threshold) activity: (1) the voice-text chat is old,
+    # (2) it forms a name pair with a dead text channel, or (3) it belongs to a 'dead category' with no
+    # recently-active channel at all (including text-less topic lounges). A text-less voice channel in a
+    # category that has an active channel is preserved.
     archived_text_bases = {_base_name(ca.name) for ca in plan.archive_channels}
     active_categories: set[int] = set()
     for c in channels:
@@ -249,7 +256,7 @@ def plan_cleanup(
             continue
         a = age_days(c.get("last_message_id"), now_ms)
         if a is not None and a < inactive_days:
-            continue  # 최근 음성-텍스트챗 활동 → 유지
+            continue  # recent voice-text chat activity → keep
         if (
             a is not None
             or _base_name(name) in archived_text_bases
@@ -257,9 +264,10 @@ def plan_cleanup(
         ):
             plan.archive_channels.append(ChannelAction(cid, name, a))
 
-    # 역할 분류: 살아있는 채널이 쓰는 역할은 보존. 죽은(아카이브/퍼지) 채널 '전용' 역할은 멤버가
-    # 남아 있어도 채널이 사라지면 무용이라 정리. 채널과 무관한 정체성 역할(어디에도 미사용 +
-    # 멤버 보유)은 보존(관심사/기수/색상 등).
+    # Role classification: a role used by a live channel is preserved. A role 'dedicated' to a dead
+    # (archive/purge) channel is cleaned up — even if it still has members, it is useless once the channel
+    # is gone. An identity role unrelated to channels (unused anywhere + has members) is preserved
+    # (interests/cohort/color, etc.).
     moving_or_purging = {ca.id for ca in plan.archive_channels} | {cp.id for cp in plan.purge_channels}
     live_role_refs: set[int] = set()
     dead_role_refs: set[int] = set()
@@ -277,23 +285,23 @@ def plan_cleanup(
         if admin_role_id and rid == int(admin_role_id):
             continue
         if rid in protected_ids:
-            continue  # 외부 보호 역할(예: 레벨 보상)
+            continue  # externally protected role (e.g. level reward)
         if _is_protected(name, protected_parts):
-            continue  # 이름 보호 — 운영/관리/모더 등 스태프 역할
+            continue  # name-protected — staff roles like ops/admin/mod
         if rid in live_role_refs:
-            continue  # 살아있는 채널이 쓰는 역할은 보존
+            continue  # a role used by a live channel is preserved
         mc = int(r.get("member_count", 0))
         if rid in dead_role_refs:
-            # 죽은 채널 전용 역할 — 멤버가 있어도 정리(채널이 사라져 무용).
-            plan.delete_roles.append(RoleAction(rid, name, f"죽은 채널 전용·멤버 {mc}명"))
+            # role dedicated to a dead channel — cleaned up even with members (useless once the channel is gone).
+            plan.delete_roles.append(RoleAction(rid, name, t("cleanup.reason_dead_channel", mc=mc)))
         elif mc == 0:
-            plan.delete_roles.append(RoleAction(rid, name, "멤버 0명·미사용"))
+            plan.delete_roles.append(RoleAction(rid, name, t("cleanup.reason_no_members")))
         elif not _is_cohort(name):
-            # 채널 미사용 + 멤버 보유 + 기수(계절명) 아님 → 제거 후보(사용자 정책).
-            plan.delete_roles.append(RoleAction(rid, name, f"채널 미사용·멤버 {mc}명(비기수)"))
-        # else: 기수(계절명) 역할 → 보존
+            # unused by channels + has members + not a cohort (season name) → removal candidate (user policy).
+            plan.delete_roles.append(RoleAction(rid, name, t("cleanup.reason_unused_member", mc=mc)))
+        # else: cohort (season name) role → preserve
 
-    # 고아(빈) 카테고리: 자식 채널이 0인 카테고리. 아카이브 카테고리·보호 이름은 제외.
+    # Orphan (empty) categories: categories with 0 child channels. Archive categories and protected names are excluded.
     child_counts: dict[int, int] = {}
     for c in channels:
         p = c.get("parent_id")

@@ -405,6 +405,7 @@ def test_confirm_view_rejects_unauthorized_clicker(loop):
 
 def test_export_server_yaml_from_guild_roundtrips():
     import discord
+
     from dcm.service import guild_admin as ga
     from dcm.service.template import parse_template
 

@@ -1,4 +1,4 @@
--- Memory store (DESIGN.md §6).
+-- Memory store (ARCHITECTURE.md §6).
 -- M2 stores embeddings as a float32 BLOB and does brute-force cosine in Python — simple and
 -- dependency-light at personal/small-guild scale. The sqlite-vec virtual table can replace this
 -- later behind the same MemoryStore interface when scale demands it.
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_subject ON memories(subject_id);
 CREATE INDEX IF NOT EXISTS idx_kind ON memories(kind);
 
--- Deletion log / archive (DESIGN.md §5.5, §12) — forgetting is irreversible, keep an audit trail.
+-- Deletion log / archive (ARCHITECTURE.md §5.5, §12) — forgetting is irreversible, keep an audit trail.
 CREATE TABLE IF NOT EXISTS forgotten_memories (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   original_id  INTEGER,

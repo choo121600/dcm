@@ -22,7 +22,6 @@ from dcm.leveling.store import LevelingStore
 from dcm.platform.pycord_adapter import PycordAdapter
 from dcm.service.guild_settings import GuildSettingsStore
 
-
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ async def run_pruning(
     embedder: Embedder | None = None,
     blur_model: str | None = None,
 ) -> dict[str, int]:
-    """Forget low-retention memories (DESIGN.md §5.5).
+    """Forget low-retention memories (ARCHITECTURE.md §5.5).
 
     retention = importance_norm * recency * (1 + ln(1 + access_count)). Below `threshold` a
     'normal' memory is deleted (or, in blur mode, abstracted once before a later deletion).

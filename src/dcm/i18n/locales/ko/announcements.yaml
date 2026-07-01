@@ -1,0 +1,18 @@
+announcements:
+  # CronError / ValueError 메시지.
+  err_empty_field: "빈 필드 항목: {field!r}"
+  err_bad_step: "잘못된 step: {part!r}"
+  err_bad_range: "잘못된 범위: {part!r}"
+  err_bad_value: "잘못된 값: {part!r}"
+  err_out_of_range: "범위 벗어남: {part!r} (허용 {lo}-{hi})"
+  err_cron_fields: "cron 은 5필드여야 함: '분 시 일 월 요일' (예: '0 9 * * 1')"
+  err_cron_or_runat: "cron 또는 run_at 중 하나는 필요"
+  err_lead_negative: "lead_days 는 음수 불가"
+
+  # 이벤트 카운트다운 메시지 (render_event_message).
+  # 요일 한 글자 표기 — [weekday] 인덱싱을 위해 7글자여야 함.
+  weekday_letters: "월화수목금토일"
+  dday_label: "🔔 **D-DAY**"
+  dcount_label: "🔔 **D-{days}**"
+  title_line: "{tag} · 📅 **{title}**"
+  date_label: "🗓️ {date} ({dow}) {time} (KST)"

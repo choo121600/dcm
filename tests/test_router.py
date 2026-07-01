@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import pytest
 from typing import Any
 
-from dcm.agent.router import DISPATCH_TOOL, VERBS, NLRouter, _DESTRUCTIVE_VERBS
+import pytest
+
+from dcm.agent.router import _DESTRUCTIVE_VERBS, DISPATCH_TOOL, VERBS, NLRouter
 from dcm.platform.base import AuthContext
 
 # ────────────────────────────────── 상수 ──────────────────────────────────

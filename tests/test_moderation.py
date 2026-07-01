@@ -14,11 +14,10 @@ import pytest
 from dcm.agent.router import VERBS, NLRouter
 from dcm.platform.base import AuthContext
 from dcm.service.guild_admin import (
-    GuildAdminService,
-    PendingConfirmations,
-    OpResult,
     RISK_HIGH,
     RISK_LOW,
+    GuildAdminService,
+    PendingConfirmations,
 )
 
 # ────────────────────────────────── 상수 ──────────────────────────────────

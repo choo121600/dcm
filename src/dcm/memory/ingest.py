@@ -26,7 +26,7 @@ _EXTRACT_SYSTEM = (
 
 
 def _parse_items(raw: str) -> tuple[list[dict], bool]:
-    """추출 결과를 (memories, injection_flag) 로 파싱. 신규 envelope 객체·레거시 배열 모두 허용."""
+    """Parse the extraction result into (memories, injection_flag). Accepts both the new envelope object and the legacy array."""
     text = raw.strip()
     if text.startswith("```"):  # tolerate fenced output
         text = text.strip("`")
@@ -44,7 +44,7 @@ def _parse_items(raw: str) -> tuple[list[dict], bool]:
         if not isinstance(raw_items, list):
             raw_items = []
         injection = bool(data.get("injection"))
-    elif isinstance(data, list):  # 레거시: 배열만(인젝션 신호 없음)
+    elif isinstance(data, list):  # legacy: array only (no injection signal)
         raw_items, injection = data, False
     else:
         return [], False
@@ -53,7 +53,7 @@ def _parse_items(raw: str) -> tuple[list[dict], bool]:
 
 
 class IngestionPipeline:
-    """Turns a finished exchange into stored memories (DESIGN.md §5.3). Runs off the response path."""
+    """Turns a finished exchange into stored memories (ARCHITECTURE.md §5.3). Runs off the response path."""
 
     def __init__(
         self,

@@ -6,7 +6,7 @@ _SECONDS_PER_DAY = 86_400.0
 
 
 def half_life_seconds(importance: float, base_days: float) -> float:
-    """Half-life grows with importance: important memories fade slowly (DESIGN.md §5.5)."""
+    """Half-life grows with importance: important memories fade slowly (ARCHITECTURE.md §5.5)."""
     return base_days * _SECONDS_PER_DAY * max(1.0, importance)
 
 
@@ -19,7 +19,7 @@ def recency(now: float, last_access_at: float, half_life: float) -> float:
 
 
 def retention(importance: float, recency_value: float, access_count: int) -> float:
-    """Overall keep-score used by pruning (DESIGN.md §5.5). Higher = keep."""
+    """Overall keep-score used by pruning (ARCHITECTURE.md §5.5). Higher = keep."""
     importance_norm = importance / 10.0
     return importance_norm * recency_value * (1.0 + math.log(1.0 + access_count))
 
@@ -32,6 +32,6 @@ def retrieval_score(
     w_rec: float,
     w_imp: float,
 ) -> float:
-    """Weighted sum of relevance + recency + importance (DESIGN.md §5.4)."""
+    """Weighted sum of relevance + recency + importance (ARCHITECTURE.md §5.4)."""
     importance_norm = importance / 10.0
     return w_rel * relevance + w_rec * recency_value + w_imp * importance_norm

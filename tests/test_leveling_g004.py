@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from dcm.i18n import t
 from dcm.leveling.scoring import cum_cost, utc_day
 from dcm.leveling.service import DANGEROUS_PERMISSION_NAMES, LevelingService
 from dcm.leveling.store import LevelingStore
-from dcm.orchestrator import _LLM_QUOTA_REPLY, Orchestrator
+from dcm.orchestrator import Orchestrator
 from dcm.platform.base import IncomingMessage
 
+_LLM_QUOTA_REPLY = t("orchestrator.llm_quota_reply")
 
 # ───────────────────────── 공통 헬퍼 ─────────────────────────
 

@@ -1,0 +1,12 @@
+leveling:
+  # rank_embed — personal activity level card.
+  rank_title: "{display_name}'s activity level"
+  field_level: "Level"
+  field_total_xp: "Total XP"
+  field_next_level: "To next level"
+  next_level_value: "{remaining} XP ({percent}%)"
+
+  # leaderboard_embed — activity leaderboard.
+  leaderboard_title: "🏆 Activity leaderboard"
+  leaderboard_empty: "No activity yet. Chat to start earning XP!"
+  leaderboard_row: "**{rank}.** {name} — Lv {level} ({xp} XP)"

@@ -1,0 +1,8 @@
+# English locale. Keys mirror ko.yaml (the reference catalog); any key omitted here
+# falls back to the Korean value. Keys are dotted namespaces resolved via
+# dcm.i18n.t("namespace.key", **params). See ARCHITECTURE.md §10.
+
+_meta:
+  locale: en
+  name: English
+  language: English

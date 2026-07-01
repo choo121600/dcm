@@ -14,7 +14,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dcm.leveling import scoring
-from dcm.leveling.scoring import PENALTY_INJECTION, caps_ratio, cum_cost, danger_score, level, penalty_weight
+from dcm.leveling.scoring import (
+    PENALTY_INJECTION,
+    caps_ratio,
+    cum_cost,
+    danger_score,
+    level,
+    penalty_weight,
+)
 from dcm.leveling.service import PENALTY_WINDOW_CAP, LevelingService
 from dcm.leveling.store import LevelingStore
 from dcm.memory.ingest import _parse_items

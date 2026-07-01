@@ -1,0 +1,10 @@
+router:
+  guild_only: "⛔ Admin commands can only be used inside a server."
+  admin_only: "⛔ Only admins can use this command."
+  destructive_blocked: "⚠️ The '{verb}' action is destructive, so I can't run it directly from the NL path. Use the slash command to get a confirmation token and proceed."
+  missing_params: "❓ Missing info needed to run '{verb}': {missing}. Let me know again."
+  unknown_verb: "❓ Unknown action: {verb}"
+  dispatch_error: "⚠️ Something went wrong while running the command."
+  needs_confirmation: "⚠️ The '{verb}' action needs confirmation (high-risk). Use the slash command to get a confirmation token and proceed."
+  ok: "✅ {detail}"
+  fail: "❌ {detail}"

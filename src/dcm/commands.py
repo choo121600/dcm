@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-# Lightweight intent detection for self-service memory commands (DESIGN.md §13.5, §14.2).
+# Lightweight intent detection for self-service memory commands (ARCHITECTURE.md §13.5, §14.2).
 # These act only on the asking user's OWN memories, so they are privacy-safe by construction.
 
 _FORGET = re.compile(r"(잊어|날\s*잊|기억.*(지워|삭제|없애)|forget\s*me)", re.IGNORECASE)

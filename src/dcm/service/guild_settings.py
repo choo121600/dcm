@@ -1,8 +1,8 @@
-"""서버(길드)별 설정 저장소 (멀티길드 v2).
+"""Per-server (guild) settings store (multi-guild v2).
 
-discord-free 순수 모듈. memory.db 와 동일 SQLite 파일을 재사용한다(단일 백업/마이그레이션).
-env 의 admin_guild_id/admin_role_id 등은 기존 시드 길드의 기본값으로만 1회 시드되고,
-그 외 길드는 미설정(=authz 폴백 트리거)으로 둔다.
+discord-free pure module. Reuses the same SQLite file as memory.db (single backup/migration).
+env values like admin_guild_id/admin_role_id are seeded once only as defaults for the existing
+seed guild; all other guilds are left unset (= triggers the authz fallback).
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS guild_settings (
 );
 """
 
-# _upsert 가 SQL 에 직접 끼워넣을 수 있는 컬럼 (외부 입력 아님 — 인젝션 방지 allowlist).
+# Columns _upsert may inline directly into SQL (not external input — injection-prevention allowlist).
 _SETTABLE = frozenset(
     {
         "admin_role_id",
@@ -50,17 +50,17 @@ _SETTABLE = frozenset(
 @dataclass(frozen=True)
 class GuildSettings:
     guild_id: str
-    admin_role_id: int = 0  # 0 = 미설정 → authz 가 디스코드 권한 폴백 사용
+    admin_role_id: int = 0  # 0 = unset → authz uses the Discord-permission fallback
     welcome_channel_id: int | None = None
     default_role_id: int | None = None
     welcome_message: str | None = None
-    leveling_enabled: bool | None = None  # None = 기본 활성(서비스 기본값 사용)
-    leveling_cooldown_seconds: float | None = None  # None = 서비스 기본(60s)
-    leveling_top_n: int | None = None  # None = 서비스 기본(10)
-    leveling_decay_enabled: bool | None = None  # None = 기본 OFF(신뢰-하락 비활성)
-    leveling_decay_shadow: bool | None = None  # None = 기본 enforce(decay 활성 시 실제 차감)
-    leveling_danger_enabled: bool | None = None  # None = 기본 OFF(위험 워드리스트 비활성)
-    leveling_injection_enabled: bool | None = None  # None = 기본 OFF(인젝션 신호 비활성)
+    leveling_enabled: bool | None = None  # None = enabled by default (uses the service default)
+    leveling_cooldown_seconds: float | None = None  # None = service default (60s)
+    leveling_top_n: int | None = None  # None = service default (10)
+    leveling_decay_enabled: bool | None = None  # None = OFF by default (trust-decay disabled)
+    leveling_decay_shadow: bool | None = None  # None = enforce by default (actually deducts when decay is enabled)
+    leveling_danger_enabled: bool | None = None  # None = OFF by default (danger wordlist disabled)
+    leveling_injection_enabled: bool | None = None  # None = OFF by default (injection signal disabled)
 
 
 class GuildSettingsStore:
@@ -77,8 +77,8 @@ class GuildSettingsStore:
             self._seed(seed)
 
     def _migrate(self) -> None:
-        # 기존 DB 에 leveling 컬럼이 없으면 추가(idempotent). CREATE TABLE IF NOT EXISTS 는 기존
-        # 테이블 컬럼을 바꾸지 않으므로 여기서 ALTER 한다(memory.store._migrate 와 동일 패턴).
+        # Add leveling columns if an existing DB lacks them (idempotent). CREATE TABLE IF NOT EXISTS
+        # does not alter existing-table columns, so we ALTER here (same pattern as memory.store._migrate).
         cols = {r["name"] for r in self._db.execute("PRAGMA table_info(guild_settings)")}
         for col, ddl in (
             ("leveling_enabled", "INTEGER"),
@@ -94,7 +94,7 @@ class GuildSettingsStore:
         self._db.commit()
 
     def _seed(self, seed: GuildSettings) -> None:
-        # 시드 길드 기본값을 1회만 (운영자가 이후 바꾼 값은 덮어쓰지 않음 — INSERT OR IGNORE).
+        # Seed-guild defaults once only (values the operator later changed are not overwritten — INSERT OR IGNORE).
         self._db.execute(
             "INSERT OR IGNORE INTO guild_settings (guild_id, admin_role_id, welcome_channel_id, "
             "default_role_id, welcome_message, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -143,8 +143,8 @@ class GuildSettingsStore:
         )
 
     def _upsert(self, guild_id: int | str, field: str, value) -> None:
-        if field not in _SETTABLE:  # 방어: 고정 set_* 메서드에서만 호출되지만 한 번 더 가드
-            raise ValueError(f"settable 아님: {field}")
+        if field not in _SETTABLE:  # defensive: only called by the fixed set_* methods, but guard once more
+            raise ValueError(f"not a settable field: {field}")
         self._db.execute(
             f"INSERT INTO guild_settings (guild_id, {field}, updated_at) VALUES (?, ?, ?) "
             f"ON CONFLICT(guild_id) DO UPDATE SET {field} = excluded.{field}, "

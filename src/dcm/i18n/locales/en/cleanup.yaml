@@ -1,0 +1,35 @@
+cleanup:
+  # Single channel line.
+  no_messages: "no messages"
+  days_ago: "{days:.0f} days ago"
+  chan_line: "  • #{name} (last active {age})"
+
+  # Full cleanup report (summary).
+  report_header: "🧹 Cleanup status (inactive threshold {days} days)"
+  report_archive_section: "\n📦 Inactive channels to archive: {count}"
+  report_purge_section: "\n🔥 Channels already in the archive to purge (delete): {count}"
+  report_roles_section: "\n🗑️ Orphan roles to delete on purge: {count}"
+  report_categories_section: "\n🗂️ Empty categories to delete on purge: {count}"
+  report_more: "  …and {count} more"
+  report_commands: "\nCommands: /cleanup-archive (move · reversible) → /cleanup-purge (permanent delete)"
+
+  # List items.
+  chan_bullet: "  • #{name}"
+  role_bullet: "  • @{name} ({reason})"
+  cat_bullet: "  • {name}"
+
+  # Archive preview (archive_summary).
+  archive_none: "No inactive channels to move to the archive ✅"
+  archive_header: "📦 {count} channel(s) to archive (hidden from members, reversible):"
+
+  # Purge preview (purge_summary).
+  purge_none: "The archive is empty and there are no orphan roles/categories to delete ✅"
+  purge_header: "🔥 Permanent deletion (irreversible):"
+  purge_channels_section: "\nArchive channels: {count}"
+  purge_roles_section: "\nOrphan roles: {count}"
+  purge_categories_section: "\nEmpty categories: {count}"
+
+  # Role deletion reasons (RoleAction.reason).
+  reason_dead_channel: "dead-channel-only · {mc} member(s)"
+  reason_no_members: "0 members · unused"
+  reason_unused_member: "channel-unused · {mc} member(s) (non-cohort)"

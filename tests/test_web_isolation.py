@@ -15,7 +15,6 @@ from dcm.llm import LLMClient
 from dcm.orchestrator import Orchestrator
 from dcm.platform.base import IncomingMessage
 
-
 # ─────────────────────────── 공통 헬퍼 ──────────────────────────────
 
 def _incoming(author_id: str = "u1", text: str = "안녕") -> IncomingMessage:

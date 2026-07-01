@@ -13,8 +13,11 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from dcm.orchestrator import _MONOPOLY_MIN_REPLIES, _MONOPOLY_REPLY, Orchestrator
+from dcm.i18n import t
+from dcm.orchestrator import _MONOPOLY_MIN_REPLIES, Orchestrator
 from dcm.platform.base import BufferedMessage, IncomingMessage
+
+_MONOPOLY_REPLY = t("orchestrator.monopoly_reply")
 
 
 def _llm(reply: str = "응답이야") -> MagicMock:
