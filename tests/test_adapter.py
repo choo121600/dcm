@@ -18,7 +18,11 @@ import discord
 import pytest
 
 from dcm.platform.base import BufferedMessage, IncomingMessage
-from dcm.platform.pycord_adapter import PycordAdapter, split_for_discord
+from dcm.platform.pycord_adapter import (
+    _THREAD_NUDGE_STREAK,
+    PycordAdapter,
+    split_for_discord,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -992,3 +996,222 @@ class TestPolishCopy:
         assert e.message == "엘엘엠없음"  # llm None → 원문 그대로
         events.close()
         anns.close()
+
+
+# ---------------------------------------------------------------------------
+# F1: 연속 1:1 → 스레드 유도 (anti-fatigue)
+# ---------------------------------------------------------------------------
+
+
+class _FakeThread:
+    def __init__(self, tid: int = 7777, name: str = "") -> None:
+        self.id = tid
+        self.name = name
+        self.type = discord.ChannelType.public_thread
+        self.sent: list[str] = []
+
+    async def send(self, text, **kw):
+        self.sent.append(text)
+
+
+def _thread_adapter():
+    adapter = _adapter()
+    bot_user = _FakeUser(999, bot=True, name="지우")
+    _swap_in_fake_user(adapter, bot_user)
+    return adapter, bot_user
+
+
+def _make_addressed_msg(channel, author, bot_user, created: list):
+    msg = _FakeMessage(channel, author, f"<@{bot_user.id}> 얘기하자", [bot_user])
+
+    async def create_thread(*, name, auto_archive_duration=None):
+        t = _FakeThread(name=name)
+        created.append(t)
+        return t
+
+    msg.create_thread = create_thread
+    return msg
+
+
+def test_sustained_1on1_creates_thread_on_streak(loop):
+    """같은 유저가 한 채널에서 연속으로 봇을 부르면 streak 임계에서 스레드가 생기고
+    그 답변은 채널이 아니라 스레드로 간다."""
+    adapter, bot_user = _thread_adapter()
+
+    async def handler(incoming, buffer):
+        return "그래 ㅋㅋ"
+
+    adapter.on_mention(handler)
+
+    author = _FakeUser(1, name="choo")
+    channel = _FakeChannel([])
+    created: list = []
+
+    # 임계 직전(streak-1)까지: 전부 채널로, 스레드 없음
+    for _ in range(_THREAD_NUDGE_STREAK - 1):
+        loop.run_until_complete(
+            adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+        )
+    assert created == []
+    assert channel.sent == ["그래 ㅋㅋ"] * (_THREAD_NUDGE_STREAK - 1)
+
+    # 임계 도달: 스레드 생성 + 답변은 스레드로, 채널 sent 는 그대로
+    loop.run_until_complete(
+        adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+    )
+    assert len(created) == 1
+    assert created[0].sent == ["그래 ㅋㅋ"]
+    assert channel.sent == ["그래 ㅋㅋ"] * (_THREAD_NUDGE_STREAK - 1)
+
+
+def test_alternating_users_never_thread(loop):
+    """서로 다른 유저가 번갈아 부르면 연속 streak 이 쌓이지 않아 스레드를 만들지 않는다."""
+    adapter, bot_user = _thread_adapter()
+
+    async def handler(incoming, buffer):
+        return "ㅇㅇ"
+
+    adapter.on_mention(handler)
+
+    a = _FakeUser(1, name="a")
+    b = _FakeUser(2, name="b")
+    channel = _FakeChannel([])
+    created: list = []
+    for i in range(_THREAD_NUDGE_STREAK * 2):
+        who = a if i % 2 == 0 else b
+        loop.run_until_complete(
+            adapter.on_message(_make_addressed_msg(channel, who, bot_user, created))
+        )
+    assert created == []
+    assert len(channel.sent) == _THREAD_NUDGE_STREAK * 2
+
+
+def test_no_nested_thread_when_already_in_thread(loop):
+    """이미 스레드 안(channel.type=public_thread)이면 임계를 넘겨도 중첩 스레드를 만들지 않는다."""
+    adapter, bot_user = _thread_adapter()
+
+    async def handler(incoming, buffer):
+        return "여기 스레드"
+
+    adapter.on_mention(handler)
+
+    author = _FakeUser(1, name="choo")
+    channel = _FakeChannel([])
+    channel.type = discord.ChannelType.public_thread
+    created: list = []
+    for _ in range(_THREAD_NUDGE_STREAK + 2):
+        loop.run_until_complete(
+            adapter.on_message(_make_addressed_msg(channel, author, bot_user, created))
+        )
+    assert created == []
+    assert len(channel.sent) == _THREAD_NUDGE_STREAK + 2
+
+
+# ── 스터디 참여 버튼(studyjoin) 인터랙션 ──────────────────────────────────
+class _SJRole:
+    def __init__(self, rid, name, perms=0):
+        import types
+
+        self.id = rid
+        self.name = name
+        self.permissions = types.SimpleNamespace(value=perms)
+
+
+class _SJMember:
+    def __init__(self, roles=None):
+        self.roles = list(roles or [])
+        self.added = []
+        self.removed = []
+
+    async def add_roles(self, role, reason=None):
+        self.roles.append(role)
+        self.added.append(role)
+
+    async def remove_roles(self, role, reason=None):
+        self.roles = [r for r in self.roles if r is not role]
+        self.removed.append(role)
+
+
+class _SJGuild:
+    def __init__(self, roles):
+        self._roles = {r.id: r for r in roles}
+
+    def get_role(self, rid):
+        return self._roles.get(rid)
+
+
+class _SJResp:
+    def __init__(self):
+        self.messages = []
+
+    async def send_message(self, text, **kw):
+        self.messages.append((text, kw))
+
+
+class _SJInteraction:
+    def __init__(self, custom_id, guild, member, itype=None):
+        import discord
+
+        self.type = itype or discord.InteractionType.component
+        self.data = {"custom_id": custom_id}
+        self.guild = guild
+        self.user = member
+        self.response = _SJResp()
+
+
+class TestStudyJoin:
+    @staticmethod
+    def _adapter():
+        return PycordAdapter(token="x", bot_name="썩스가재", guild_id=123, admin_role_id=0)
+
+    def test_join_adds_role(self, loop):
+        a = self._adapter()
+        role = _SJRole(555, "알고리즘(초급)", perms=0)
+        member = _SJMember(roles=[])
+        it = _SJInteraction("studyjoin:555", _SJGuild([role]), member)
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert role in member.roles and member.added == [role]
+        assert any("참여 완료" in m[0] for m in it.response.messages)
+
+    def test_leave_removes_role(self, loop):
+        a = self._adapter()
+        role = _SJRole(555, "알고리즘(초급)", perms=0)
+        member = _SJMember(roles=[role])
+        it = _SJInteraction("studyjoin:555", _SJGuild([role]), member)
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert role not in member.roles and member.removed == [role]
+        assert any("나왔어" in m[0] for m in it.response.messages)
+
+    def test_privileged_role_rejected(self, loop):
+        a = self._adapter()
+        role = _SJRole(999, "운영진", perms=8)  # Administrator 비트
+        member = _SJMember(roles=[])
+        it = _SJInteraction("studyjoin:999", _SJGuild([role]), member)
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert member.added == [] and role not in member.roles
+        assert any("버튼으로 받을 수 없어" in m[0] for m in it.response.messages)
+
+    def test_non_studyjoin_custom_id_ignored(self, loop):
+        a = self._adapter()
+        member = _SJMember(roles=[])
+        it = _SJInteraction("confirm:abc", _SJGuild([]), member)
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert it.response.messages == []
+
+    def test_non_component_interaction_ignored(self, loop):
+        import discord
+
+        a = self._adapter()
+        member = _SJMember(roles=[])
+        it = _SJInteraction(
+            "studyjoin:1", _SJGuild([]), member, itype=discord.InteractionType.application_command
+        )
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert it.response.messages == []
+
+    def test_deleted_role_reports(self, loop):
+        a = self._adapter()
+        member = _SJMember(roles=[])
+        it = _SJInteraction("studyjoin:404", _SJGuild([]), member)  # role 없음
+        loop.run_until_complete(a._on_component_interaction(it))
+        assert any("없어졌어" in m[0] for m in it.response.messages)

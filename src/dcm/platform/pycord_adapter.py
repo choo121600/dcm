@@ -37,6 +37,22 @@ _SETUP_INTENT_WORDS = (
 _EXPORT_FORMAT_WORDS = ("yaml", "json", "템플릿", "블루프린트", "blueprint")
 _EXPORT_ACTION_WORDS = ("뽑", "추출", "내보내", "백업", "스냅샷", "snapshot", "export", "dump", "확인", "보여", "구조")
 
+# 스레드 유도 (anti-fatigue): 한 유저가 한 채널에서 봇과 연속 1:1 대화를 이어가면 그 메시지에
+# 공개 스레드를 만들어 이후 답변을 거기로 보내 메인 채널을 정리한다(길드 격리 유지).
+_THREAD_NUDGE_STREAK = 5  # 같은 유저 연속 봇 답변이 이 값에 도달하면 스레드 생성
+_THREAD_NUDGE_COOLDOWN = 600.0  # 스레드 생성 후 그 채널에서 재생성까지 쿨다운(초)
+_THREAD_AUTO_ARCHIVE_MIN = 1440  # 스레드 자동 보관(분): 24h
+# 스레드로 취급할 Discord 채널 타입 — 이 안이면 이미 스레드이므로 중첩 생성하지 않는다.
+_THREAD_CHANNEL_TYPES = frozenset(
+    t
+    for t in (
+        getattr(discord.ChannelType, "public_thread", None),
+        getattr(discord.ChannelType, "private_thread", None),
+        getattr(discord.ChannelType, "news_thread", None),
+    )
+    if t is not None
+)
+
 
 def split_for_discord(text: str, limit: int = DISCORD_MAX) -> list[str]:
     """Split text into chunks that fit Discord's per-message limit, preferring line breaks."""
@@ -80,6 +96,10 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._guild_id = guild_id  # guild for guild-scoped slash registration (ralplan S1/S2)
         self._admin_role_id = admin_role_id  # designated ADMIN_ROLE for the InvokerCheck (S2)
         self._last_seen: dict[str, float] = {}  # author_id → monotonic ts (cooldown, §14.4)
+        # 스레드 유도(anti-fatigue): 채널별 (마지막 응답 대상 author_id, 연속 streak) + 재생성 쿨다운.
+        self._chan_addresser: dict[str, str] = {}
+        self._chan_streak: dict[str, int] = {}
+        self._thread_cooldown: dict[str, float] = {}
         self._handler: MentionHandler | None = None
         self._service = None  # GuildAdmin policy service, wired in register_admin_commands (S2)
         self._pending = policy.PendingConfirmations()  # adapter-local confirm-token carry (S2)
@@ -104,6 +124,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         self._client.event(self.on_ready)
         self._client.event(self.on_message)
         self._client.event(self.on_member_join)
+        # 스터디 참여 버튼(studyjoin:<role_id>) 처리 — add_listener 라서 슬래시 처리(기본 on_interaction)와 공존.
+        self._client.add_listener(self._on_component_interaction, "on_interaction")
 
     def on_mention(self, handler: MentionHandler) -> None:
         self._handler = handler
@@ -167,6 +189,49 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             except Exception:  # noqa: BLE001
                 log.exception("announcement loop tick failed")
             await asyncio.sleep(60)
+
+    async def _on_component_interaction(self, interaction) -> None:
+        """스터디 참여 버튼(studyjoin:<role_id>) 클릭 처리. 그 외 인터랙션은 무시(슬래시는 봇 기본 흐름)."""
+        try:
+            if interaction.type != discord.InteractionType.component:
+                return
+            data = interaction.data if isinstance(interaction.data, dict) else {}
+            cid = data.get("custom_id", "")
+            if not cid.startswith("studyjoin:"):
+                return
+            try:
+                role_id = int(cid.split(":", 1)[1])
+            except ValueError:
+                return
+            await self._toggle_self_role(interaction, role_id)
+        except Exception:  # noqa: BLE001 - 버튼 처리 실패는 침묵(로그만)
+            log.exception("study-join interaction failed")
+
+    async def _toggle_self_role(self, interaction, role_id: int) -> None:
+        """스터디 역할 셀프 토글. 권한 없는(view 전용) 역할만 허용 — 권한 있는 역할 자가부여 차단."""
+        guild = interaction.guild
+        role = guild.get_role(role_id) if guild else None
+        member = getattr(interaction, "user", None)
+        if guild is None or member is None:
+            await interaction.response.send_message("서버 안에서만 쓸 수 있어.", ephemeral=True)
+            return
+        if role is None:
+            await interaction.response.send_message("이 스터디 역할이 없어졌어. 운영진에게 알려줘.", ephemeral=True)
+            return
+        if role.permissions.value != 0:
+            await interaction.response.send_message("이 역할은 버튼으로 받을 수 없어.", ephemeral=True)
+            return
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="스터디 셀프 탈퇴 (버튼 패널)")
+                await interaction.response.send_message(f"➖ **{role.name}** 스터디에서 나왔어.", ephemeral=True)
+            else:
+                await member.add_roles(role, reason="스터디 셀프 참여 (버튼 패널)")
+                await interaction.response.send_message(
+                    f"✅ **{role.name}** 참여 완료! 왼쪽 목록에 📚 채널이 보일 거야.", ephemeral=True
+                )
+        except discord.Forbidden:
+            await interaction.response.send_message("역할 변경 권한이 부족해. 운영진에게 알려줘.", ephemeral=True)
 
     async def on_message(self, message: discord.Message) -> None:
         # Ignore self and other bots.
@@ -238,7 +303,8 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             reply = None
 
         if reply:
-            await self._send_to(message.channel, reply)
+            target = await self._maybe_thread(message) or message.channel
+            await self._send_to(target, reply)
 
     async def on_member_join(self, member) -> None:
         """신규 멤버 입장 이벤트 핸들러 (S6 온보딩).
@@ -349,6 +415,51 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
     async def _send_to(self, channel, text: str) -> None:
         for chunk in split_for_discord(text):
             await channel.send(chunk)
+
+    async def _maybe_thread(self, message):
+        """연속 1:1 독점 완화(anti-fatigue): 같은 유저가 한 채널에서 봇과 계속 대화를 이어가면 그
+        메시지에 공개 스레드를 만들어 이후 답변을 거기로 보낸다(길드 격리 유지, 메인 채널 정리).
+
+        스레드를 새로 만들었으면 그 Thread 를 반환(호출부가 거기로 답장), 아니면 None(원 채널 유지).
+        이미 스레드 안이거나 쿨다운 중이면 유도하지 않는다. 어떤 실패도 침묵 degrade.
+        """
+        channel = getattr(message, "channel", None)
+        if channel is None or getattr(channel, "type", None) in _THREAD_CHANNEL_TYPES:
+            return None  # 채널 없음/이미 스레드 → 중첩 생성 안 함
+        cid = str(getattr(channel, "id", ""))
+        author_id = str(getattr(getattr(message, "author", None), "id", ""))
+        # 연속 streak 갱신: 같은 유저면 +1, 다른 유저면 1로 리셋.
+        if self._chan_addresser.get(cid) == author_id:
+            streak = self._chan_streak.get(cid, 0) + 1
+        else:
+            streak = 1
+            self._chan_addresser[cid] = author_id
+        self._chan_streak[cid] = streak
+        if streak < _THREAD_NUDGE_STREAK:
+            return None
+        now = time.monotonic()
+        until = self._thread_cooldown.get(cid)
+        if until is not None and now < until:
+            return None  # 최근에 이 채널에서 스레드를 만들었음 → 잠시 재생성 안 함
+        if not hasattr(message, "create_thread"):
+            return None
+        try:
+            thread = await message.create_thread(
+                name=self._thread_name(getattr(message, "author", None)),
+                auto_archive_duration=_THREAD_AUTO_ARCHIVE_MIN,
+            )
+        except Exception:
+            log.exception("스레드 생성 실패 (침묵 degrade)")
+            return None
+        self._chan_streak[cid] = 0  # 생성 성공 → streak 리셋 + 쿨다운 시작(스레드 난사 방지)
+        self._thread_cooldown[cid] = now + _THREAD_NUDGE_COOLDOWN
+        return thread
+
+    @staticmethod
+    def _thread_name(author) -> str:
+        """스레드 이름(디스코드 100자 제한 안전 truncate)."""
+        name = getattr(author, "display_name", None) or "수다"
+        return f"{name}와 수다"[:100]
 
     def _template_attachment(self, message):
         """메시지의 첫 번째 서버 템플릿 첨부(.yaml/.yml/.json)를 반환, 없으면 None."""
