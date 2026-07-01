@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # Identity
     bot_name: str = "썩스가재"
     persona_file: str = "persona.md"
+    knowledge_file: str = "knowledge.md"  # 서버/스터디/멘토 정적 지식(있으면 시스템 프롬프트에 상시 포함)
 
     # Server management (slash commands) — ralplan S1 / DESIGN.md §3.
     # Discord guild id for guild-scoped slash-command registration.

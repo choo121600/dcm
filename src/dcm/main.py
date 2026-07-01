@@ -119,6 +119,7 @@ async def _run() -> None:
     orchestrator = Orchestrator(
         llm=llm,
         persona_path=_resolve_persona(settings.persona_file),
+        knowledge_path=_resolve_persona(settings.knowledge_file),
         bot_name=settings.bot_name,
         max_input_chars=settings.max_input_chars,
         store=store,

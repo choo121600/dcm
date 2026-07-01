@@ -50,6 +50,7 @@ class Orchestrator:
         bot_name: str,
         max_input_chars: int,
         *,
+        knowledge_path: Path | None = None,
         store: MemoryStore | None = None,
         ingest: IngestionPipeline | None = None,
         embedder: Embedder | None = None,
@@ -61,6 +62,11 @@ class Orchestrator:
         self._bot_name = bot_name
         self._max_input_chars = max_input_chars
         self._persona = persona_path.read_text(encoding="utf-8")
+        self._knowledge = (
+            knowledge_path.read_text(encoding="utf-8")
+            if knowledge_path and knowledge_path.exists()
+            else ""
+        )
         self._store = store
         self._ingest = ingest
         self._embedder = embedder
@@ -81,14 +87,23 @@ class Orchestrator:
         lines = "\n".join(f"- {m.content}" for m in selves)
         return f"\n\n[who you are becoming]\n{lines}"
 
+    def _knowledge_block(self) -> str:
+        """서버/스터디/멘토 등 이 커뮤니티에 대한 정적 지식(있으면 시스템 프롬프트에 상시 포함)."""
+        if not self._knowledge:
+            return ""
+        return f"\n\n[server knowledge]\n{self._knowledge}"
+
     def _system_prompt(self, store) -> str:
         return (
             f"{self._persona}"
-            f"{self._self_block(store)}\n\n"
+            f"{self._self_block(store)}"
+            f"{self._knowledge_block()}\n\n"
             "---\n"
             f"Your name is {self._bot_name}. You are chatting in a Discord server.\n"
             "Always reply in Korean, in the casual friendly (반말) register described above. "
             "Keep replies short and natural.\n"
+            "이 커뮤니티(SUSC)·현재 열린 스터디·멘토에 대해 물으면 [server knowledge] 내용을 바탕으로 "
+            "친절히 설명해줘. 거기 없는 내용은 모른다고 솔직히 말하고 지어내지 마.\n"
             "넌 이 서버를 직접 관리할 수 있어: 카테고리·채널 생성/수정/삭제, 역할 생성/부여/회수/"
             "권한 설정, 그리고 모더레이션(추방·차단·타임아웃·메시지 정리)까지 가능해. 운영진(서버 "
             "주인 또는 관리자 역할)이 명확히 요청하면 시스템이 그 명령을 자동으로 실행해. 그러니 "

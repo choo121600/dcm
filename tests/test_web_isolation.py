@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from dcm.llm import LLMClient
 from dcm.orchestrator import Orchestrator
-from dcm.platform.base import BufferedMessage, IncomingMessage
+from dcm.platform.base import IncomingMessage
 
 
 # ─────────────────────────── 공통 헬퍼 ──────────────────────────────
@@ -199,3 +199,26 @@ def test_system_prompt_advertises_management_capability(tmp_path):
     assert "카테고리" in sp and "역할" in sp and "모더레이션" in sp
     assert "할 수 있어" in sp  # 능력 긍정
     assert "지어내" in sp  # 실행 안 했는데 성공 지어내기 금지 가드
+
+def test_system_prompt_includes_server_knowledge(tmp_path):
+    """knowledge_path 가 있으면 시스템 프롬프트에 [server knowledge] 블록으로 상시 포함
+    (SUSC·스터디·멘토를 물으면 설명 가능)."""
+    persona = tmp_path / "persona.md"
+    persona.write_text("테스트 페르소나", encoding="utf-8")
+    know = tmp_path / "knowledge.md"
+    know.write_text("SUSC 지식 마커 XYZ. 스터디 알고리즘(초급) — 멘토 김민상.", encoding="utf-8")
+    orch = Orchestrator(
+        llm=object(), persona_path=persona, knowledge_path=know, bot_name="지우", max_input_chars=4000
+    )
+    sp = orch._system_prompt(None)
+    assert "[server knowledge]\nSUSC 지식 마커 XYZ" in sp  # 지식 블록으로 포함
+    assert "김민상" in sp
+    assert "[server knowledge] 내용을 바탕으로" in sp  # 사용 지침 상시 존재
+
+
+def test_system_prompt_without_knowledge_omits_block(tmp_path):
+    """knowledge_path 미지정이면 지식 블록 없음(지침 문장의 언급과 구분)."""
+    orch = _orchestrator(object(), tmp_path=tmp_path)
+    sp = orch._system_prompt(None)
+    assert "SUSC 지식 마커 XYZ" not in sp
+    assert "[server knowledge]\n" not in sp
