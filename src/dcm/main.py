@@ -4,22 +4,23 @@ import asyncio
 import logging
 from pathlib import Path
 
+from . import i18n
+from .agent.router import NLRouter
 from .config import Settings
 from .embeddings import build_embedder
+from .leveling.service import LevelingService
+from .leveling.store import LevelingStore
 from .llm import LLMClient, parse_credentials
 from .logging_setup import setup_logging
 from .memory.ingest import IngestionPipeline
 from .memory.store import MemoryStore
-from .leveling.service import LevelingService
-from .leveling.store import LevelingStore
 from .orchestrator import Orchestrator
 from .platform.pycord_adapter import PycordAdapter
-from .service.guild_admin import GuildAdminService
-from .agent.router import NLRouter
 from .scheduler import BackgroundJobs
-from .service.onboarding import OnboardingPolicy
-from .service.guild_settings import GuildSettings, GuildSettingsStore
 from .service.announcements import AnnouncementStore, EventStore
+from .service.guild_admin import GuildAdminService
+from .service.guild_settings import GuildSettings, GuildSettingsStore
+from .service.onboarding import OnboardingPolicy
 from .service.study_lookup import StudyLookup
 
 log = logging.getLogger("dcm")
@@ -36,13 +37,15 @@ def _resolve_persona(persona_file: str) -> Path:
 async def _run() -> None:
     settings = Settings()  # loads from environment / .env
     setup_logging(settings.log_level)
+    i18n.set_locale(settings.bot_locale)  # select the bot's user-facing language (ARCHITECTURE.md §10)
+    log.info("locale: %s", i18n.get_locale())
 
     creds = parse_credentials(settings.anthropic_api_key)
     log.info("loaded %d API credential(s)", len(creds))  # count only, never the key value
 
     llm = LLMClient(creds, model=settings.model, max_tokens=settings.max_tokens)
 
-    # Memory engine (M2) — DESIGN.md §5, §6.
+    # Memory engine (M2) — ARCHITECTURE.md §5, §6.
     embedder = build_embedder(
         settings.embedding_provider, settings.embedding_api_key, settings.embedding_model
     )
@@ -62,7 +65,7 @@ async def _run() -> None:
         dedup_threshold=settings.dedup_threshold,
     )
 
-    # 서버별 설정 저장소 (멀티길드 v2) — memory.db 동일 파일, 기존 길드 기본값만 시드.
+    # Per-server settings store (multi-guild v2) — same memory.db file, seeds only the existing guild's defaults.
     guild_settings = GuildSettingsStore(
         settings.memory_db,
         seed=GuildSettings(
@@ -74,10 +77,10 @@ async def _run() -> None:
         ),
     )
 
-    # 예약 공지 저장소 (관리봇: 주기/1회성 공지). memory.db 동일 파일.
+    # Scheduled announcement store (admin bot: recurring/one-off announcements). Same memory.db file.
     announcements = AnnouncementStore(settings.memory_db)
 
-    # 행사 일정 카운트다운 공지 저장소 (D-30/14/7/3/1/DDAY 자동). memory.db 동일 파일.
+    # Event countdown announcement store (auto D-30/14/7/3/1/DDAY). Same memory.db file.
     events = EventStore(settings.memory_db)
 
     onboarding = OnboardingPolicy(
@@ -106,16 +109,16 @@ async def _run() -> None:
     admin_service = GuildAdminService(adapter, adapter.pending)
     adapter.register_admin_commands(admin_service)
 
-    # 활동 레벨링 (G001-G004): 별도 leveling.db + 단일 전용 writer(R1). guild_settings 로 per-guild 설정.
+    # Activity leveling (G001-G004): separate leveling.db + a single dedicated writer (R1). Per-guild config via guild_settings.
     leveling_store = LevelingStore(settings.leveling_db)
     leveling_service = LevelingService(leveling_store, guild_settings)
     adapter.register_leveling_commands(leveling_service)
 
-    # NL 라우터 (ralplan S3): 자연어 관리 명령을 닫힌 동사셋으로 라우팅.
+    # NL router (ralplan S3): routes natural-language admin commands onto a closed verb set.
     nl_router = NLRouter(
         llm=llm,
         service=admin_service,
-        dispatch_model=settings.ingest_model,  # 분류는 값싼 haiku로 (매 멘션 경로, 비용 절감)
+        dispatch_model=settings.ingest_model,  # classify with the cheap haiku (per-mention path, cost saving)
     )
 
     orchestrator = Orchestrator(
@@ -130,11 +133,11 @@ async def _run() -> None:
         retrieval_top_n=settings.retrieval_top_n,
         router=nl_router,
         leveling=leveling_service,
-        studies=StudyLookup(),  # 스터디 상세 온디맨드 읽기(깊은 질문일 때만 문서 fetch)
+        studies=StudyLookup(),  # on-demand study detail reads (fetch the doc only for deep questions)
     )
     adapter.on_mention(orchestrator.handle)
 
-    # Periodic memory maintenance: forgetting (M3) + reflection/growth (M4) — DESIGN.md §7.
+    # Periodic memory maintenance: forgetting (M3) + reflection/growth (M4) — ARCHITECTURE.md §7.
     if settings.enable_background_jobs:
         jobs = BackgroundJobs(
             store,
@@ -156,7 +159,7 @@ async def _run() -> None:
     try:
         await adapter.run()
     finally:
-        # R2: writer 그레이스풀 종료(큐 drain 후 close). daily_usage 유실=bounded fail-open.
+        # R2: graceful writer shutdown (drain the queue, then close). daily_usage loss = bounded fail-open.
         leveling_store.close()
         announcements.close()
         events.close()

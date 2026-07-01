@@ -1,47 +1,48 @@
-# 서버 템플릿 가이드 (`/setup-server`)
+# Server Template Guide (`/setup-server`)
 
-YAML 또는 JSON 파일 하나로 **역할(+권한) · 카테고리 · 채널(텍스트/음성) · 비공개 권한**을
-한 번에 셋업하는 기능입니다. 이 문서는 템플릿 파일 작성법과 동작 방식을 설명합니다.
+> 🌏 한국어 버전: [server-templates.ko.md](./server-templates.ko.md)
 
-- 바로 쓸 수 있는 예시: [`examples/server-template.yaml`](../examples/server-template.yaml) ·
+A feature that sets up **roles (+permissions), categories, channels (text/voice), and private access**
+all at once from a single YAML or JSON file. This document explains how to write a template file and how it works.
+
+- Ready-to-use examples: [`examples/server-template.yaml`](../examples/server-template.yaml) ·
   [`examples/server-template.json`](../examples/server-template.json) ·
   [`examples/server-template-minimal.yaml`](../examples/server-template-minimal.yaml)
 
 ---
 
-## 1. 빠른 시작
+## 1. Quick Start
 
-1. 템플릿 파일을 만든다 (`.yaml` / `.yml` / `.json`, **UTF-8**). 예시 파일을 복사해서 이름만 바꿔도 됩니다.
-2. 디스코드에서 `/setup-server` 슬래시 커맨드를 실행하고 `template` 옵션에 파일을 **첨부**한다.
-3. 봇이 **미리보기**를 보여주면 **`확인 실행`** 버튼을 누른다 → 한 번에 셋업 완료.
+1. Create a template file (`.yaml` / `.yml` / `.json`, **UTF-8**). You can just copy an example file and rename it.
+2. In Discord, run the `/setup-server` slash command and **attach** the file to the `template` option.
+3. When the bot shows a **preview**, press the **`확인 실행`** (run confirmation) button → setup is done in one shot.
 
-> `/setup-server` 는 **운영진(관리자 역할) 또는 서버 주인만** 사용할 수 있습니다.
+> `/setup-server` can only be used by **admins (with an administrator role) or the server owner**.
 
-**또는 자연어로**: `썩스가재야` 라고 부르면서 같은 템플릿 파일을 **첨부**하고 "이대로 세팅해줘" 라고 하면
-같은 미리보기 + 확인 버튼이 뜹니다. 슬래시·자연어 **둘 다 운영진/주인만** 적용할 수 있어요(아래 §8).
-
----
-
-## 2. 동작 방식
-
-- **2단계 확인**: 첨부만 하면 바로 만들지 않고 *미리보기 + 확인*을 거칩니다.
-  버튼을 누르거나, `confirm:true` 옵션으로 다시 실행(파일 재첨부)하면 적용됩니다.
-- **멱등(idempotent)**: 이미 있는 것은 **건너뜁니다**. 그래서 템플릿을 고쳐 다시 돌리면
-  *새로 추가된 것만* 생성됩니다. 같다고 판단하는 기준:
-  - 역할 → **이름**이 같으면 재사용
-  - 카테고리 → **이름**이 같으면 재사용
-  - 채널 → 같은 카테고리 안에서 **이름 + 종류(텍스트/음성)** 가 같으면 재사용 (이름 대소문자 무시)
-- **생성 순서**: 역할 → 카테고리(+비공개 권한) → 채널.
-- **비공개 카테고리**(`private: true`): 카테고리에 `@everyone` 열람을 막고 `visible_to` 역할만
-  허용합니다. 그 카테고리 아래에 만들어지는 채널은 이 권한을 **상속**합니다.
-- **부분 실패**: 도중에 실패하면 그때까지 만든 것을 보고하고 **자동 롤백은 하지 않습니다**
-  (디스코드에 트랜잭션이 없음). 메시지를 보고 정리하거나, 그냥 다시 실행하면 됩니다(멱등이라 안전).
+**Or in natural language**: call the bot by name — `썩스가재야` (`썩스가재` is the bot's name) — while **attaching** the same template file and saying "set it up like this," and you'll get the same preview + confirmation button. Both the slash command and natural language **can only be applied by admins/the owner** (see §8 below).
 
 ---
 
-## 3. 템플릿 형식
+## 2. How It Works
 
-최상위는 객체(매핑)이며 키는 `roles`, `categories` 두 가지입니다. **둘 중 하나 이상**은 있어야 합니다.
+- **Two-step confirmation**: attaching a file does not create anything immediately; it goes through a *preview + confirmation*.
+  It is applied when you press the button, or run it again (re-attaching the file) with the `confirm:true` option.
+- **Idempotent**: anything that already exists is **skipped**. So if you edit the template and run it again,
+  *only the newly added items* are created. Criteria for deciding something is "the same":
+  - Role → reused if the **name** matches
+  - Category → reused if the **name** matches
+  - Channel → reused if the **name + type (text/voice)** match within the same category (name is case-insensitive)
+- **Creation order**: roles → categories (+private access) → channels.
+- **Private category** (`private: true`): blocks `@everyone` from viewing the category and allows only the `visible_to` roles.
+  Channels created under that category **inherit** these permissions.
+- **Partial failure**: if it fails partway through, it reports what was created up to that point and **does not roll back automatically**
+  (Discord has no transactions). Read the message and clean up, or just run it again (safe, since it's idempotent).
+
+---
+
+## 3. Template Format
+
+The top level is an object (mapping) with two keys: `roles` and `categories`. **At least one of the two** must be present.
 
 ```yaml
 roles:        # 선택
@@ -50,12 +51,12 @@ categories:   # 선택
   - ...
 ```
 
-### 3.1 `roles[]` — 역할
+### 3.1 `roles[]` — Roles
 
-| 필드 | 필수 | 설명 |
+| Field | Required | Description |
 |---|---|---|
-| `name` | ✅ | 역할 이름 (1~100자) |
-| `permissions` | — | 권한 이름 목록. 생략/빈 목록이면 권한 없음 |
+| `name` | ✅ | Role name (1–100 characters) |
+| `permissions` | — | List of permission names. Omitted/empty list means no permissions |
 
 ```yaml
 roles:
@@ -64,41 +65,41 @@ roles:
   - name: 멤버           # permissions 생략 = 권한 없음
 ```
 
-#### 사용 가능한 권한 이름 (닫힌 집합 — 목록에 없는 이름은 거부)
+#### Available permission names (closed set — names not on the list are rejected)
 
-| 이름 | 의미 | 비고 |
+| Name | Meaning | Notes |
 |---|---|---|
-| `administrator` | 모든 권한 | ⚠️ 매우 위험 — 가급적 쓰지 마세요 |
-| `manage_channels` | 채널 생성/수정/삭제 | 관리 권한(고위험) |
-| `manage_roles` | 역할 생성/수정/부여 | 관리 권한(고위험) |
-| `manage_guild` (별칭 `manage_server`) | 서버 설정 관리 | 관리 권한(고위험) |
-| `manage_messages` | 메시지 삭제/고정 | 관리 권한(고위험) |
-| `manage_webhooks` | 웹훅 관리 | 관리 권한(고위험) |
-| `manage_nicknames` | 다른 멤버 닉네임 변경 | |
-| `kick_members` | 멤버 추방 | |
-| `ban_members` | 멤버 차단 | |
-| `moderate_members` (별칭 `timeout_members`) | 멤버 타임아웃 | |
+| `administrator` | All permissions | ⚠️ Very dangerous — avoid using it if possible |
+| `manage_channels` | Create/edit/delete channels | Management permission (high risk) |
+| `manage_roles` | Create/edit/assign roles | Management permission (high risk) |
+| `manage_guild` (alias `manage_server`) | Manage server settings | Management permission (high risk) |
+| `manage_messages` | Delete/pin messages | Management permission (high risk) |
+| `manage_webhooks` | Manage webhooks | Management permission (high risk) |
+| `manage_nicknames` | Change other members' nicknames | |
+| `kick_members` | Kick members | |
+| `ban_members` | Ban members | |
+| `moderate_members` (alias `timeout_members`) | Time members out | |
 
-> 관리 권한이 포함된 역할은 위험도가 높아 **항상 확인 단계**를 거칩니다(템플릿 적용 자체가 고위험).
+> Roles that include management permissions carry high risk, so they **always go through the confirmation step** (applying a template is inherently high-risk).
 
-### 3.2 `categories[]` — 카테고리
+### 3.2 `categories[]` — Categories
 
-| 필드 | 필수 | 기본값 | 설명 |
+| Field | Required | Default | Description |
 |---|---|---|---|
-| `name` | ✅ | — | 카테고리 이름 (1~100자) |
-| `channels` | — | `[]` | 이 카테고리 아래 채널 목록 |
-| `private` | — | `false` | `true`면 `@everyone` 열람 차단 후 `visible_to` 역할만 허용 |
-| `visible_to` | — | `[]` | `private`일 때 열람 허용할 역할 **이름** 목록 |
+| `name` | ✅ | — | Category name (1–100 characters) |
+| `channels` | — | `[]` | List of channels under this category |
+| `private` | — | `false` | If `true`, blocks `@everyone` from viewing and allows only the `visible_to` roles |
+| `visible_to` | — | `[]` | List of role **names** allowed to view when `private` |
 
-> `visible_to` 의 역할 이름은 같은 템플릿의 `roles` 에 있거나 서버에 이미 존재해야 합니다.
-> 찾지 못한 이름은 조용히 건너뜁니다(그 역할에는 열람 권한이 추가되지 않음).
+> The role names in `visible_to` must exist in the same template's `roles` or already exist on the server.
+> Names that cannot be found are silently skipped (no view permission is added for that role).
 
-### 3.3 `channels[]` — 채널
+### 3.3 `channels[]` — Channels
 
-| 필드 | 필수 | 기본값 | 설명 |
+| Field | Required | Default | Description |
 |---|---|---|---|
-| `name` | ✅ | — | 채널 이름 (1~100자) |
-| `type` | — | `text` | `text` 또는 `voice` |
+| `name` | ✅ | — | Channel name (1–100 characters) |
+| `type` | — | `text` | `text` or `voice` |
 
 ```yaml
 categories:
@@ -117,7 +118,7 @@ categories:
 
 ## 4. YAML vs JSON
 
-둘 다 됩니다. YAML은 JSON의 상위호환이라 같은 내용이면 결과가 동일합니다. 위 YAML과 아래 JSON은 같은 템플릿입니다.
+Both work. YAML is a superset of JSON, so identical content produces identical results. The YAML above and the JSON below are the same template.
 
 ```json
 {
@@ -138,61 +139,61 @@ categories:
 
 ---
 
-## 5. 제한과 규칙
+## 5. Limits and Rules
 
-| 항목 | 제한 |
+| Item | Limit |
 |---|---|
-| 이름 길이(역할/카테고리/채널) | 1 ~ 100자 |
-| 역할 개수 | 최대 100 |
-| 카테고리 개수 | 최대 50 |
-| 카테고리당 채널 개수 | 최대 50 |
-| 최상위 | `roles` 또는 `categories` 중 하나 이상 |
-| 이름 중복 | 같은 종류(역할끼리/카테고리끼리) 내 중복 금지 |
+| Name length (role/category/channel) | 1 – 100 characters |
+| Number of roles | Max 100 |
+| Number of categories | Max 50 |
+| Channels per category | Max 50 |
+| Top level | At least one of `roles` or `categories` |
+| Duplicate names | Duplicates forbidden within the same kind (role vs role / category vs category) |
 
 ---
 
-## 6. 권한과 안전
+## 6. Permissions and Safety
 
-- `/setup-server` 는 **운영진(지정 관리자 역할) 또는 서버 주인** 만 실행할 수 있습니다.
-- 봇이 실제로 만들려면 디스코드에서 **Manage Channels / Manage Roles** 권한이 있어야 합니다
-  (모더레이션 권한까지 주려면 Kick/Ban/Moderate Members). 봇 역할을 *관리할 역할들보다 위*에 두세요.
-- 모든 변경은 감사 로그(Audit Log)에 *요청한 사람*이 기록됩니다.
+- `/setup-server` can only be run by **admins (a designated administrator role) or the server owner**.
+- For the bot to actually create things, it needs **Manage Channels / Manage Roles** permissions in Discord
+  (add Kick/Ban/Moderate Members too if you want to grant moderation permissions). Place the bot's role *above the roles it will manage*.
+- Every change is recorded in the Audit Log against *the person who requested it*.
 
 ---
 
-## 7. 자주 나는 오류와 해결
+## 7. Common Errors and Fixes
 
-| 메시지(일부) | 원인 | 해결 |
+| Message (excerpt) | Cause | Fix |
 |---|---|---|
-| `빈 템플릿이야…` | 파일이 비었음 | 내용을 채워서 다시 첨부 |
-| `최상위는 매핑(객체)이어야 해` | 파일이 목록/문장으로 시작 | `roles:` / `categories:` 로 시작하는 객체로 |
-| `알 수 없는 권한 'X'` | 권한 이름 오타 | 3.1의 권한 이름 표 확인 |
-| `…type: 'text' 또는 'voice'여야 해` | 채널 종류 오타 | `text` 또는 `voice` 로 |
-| `중복 역할/카테고리 이름` | 같은 이름 두 번 | 이름을 유일하게 |
-| `이름이 너무 길어 (최대 100자)` | 이름 길이 초과 | 100자 이하로 |
-| `YAML/JSON 파싱 실패` | 들여쓰기/문법 오류 | 들여쓰기(공백) 확인, 탭 금지 |
-| `템플릿 확인 토큰이 유효하지 않거나 만료됐어` | 미리보기 없이 토큰만 줬거나 만료 | 파일을 다시 첨부해 미리보기부터 |
+| `빈 템플릿이야…` (empty template) | The file was empty | Fill in content and re-attach |
+| `최상위는 매핑(객체)이어야 해` (top level must be a mapping/object) | The file starts with a list/sentence | Use an object starting with `roles:` / `categories:` |
+| `알 수 없는 권한 'X'` (unknown permission 'X') | Typo in a permission name | Check the permission names table in 3.1 |
+| `…type: 'text' 또는 'voice'여야 해` (type must be 'text' or 'voice') | Typo in the channel type | Use `text` or `voice` |
+| `중복 역할/카테고리 이름` (duplicate role/category name) | The same name appears twice | Make the name unique |
+| `이름이 너무 길어 (최대 100자)` (name is too long, max 100 characters) | Name length exceeded | Keep it under 100 characters |
+| `YAML/JSON 파싱 실패` (YAML/JSON parse failure) | Indentation/syntax error | Check indentation (spaces), no tabs |
+| `템플릿 확인 토큰이 유효하지 않거나 만료됐어` (template confirmation token is invalid or expired) | A token was given without a preview, or it expired | Re-attach the file to start from the preview |
 
 ---
 
-## 8. 자연어(`썩스가재야`)로 적용하기
+## 8. Applying via natural language (`썩스가재야`)
 
-슬래시 커맨드 대신 봇을 자연어로 불러서도 됩니다.
+Instead of the slash command, you can also summon the bot in natural language.
 
-**템플릿 전체 적용** — `썩스가재야` 라고 부르면서 템플릿 파일(`.yaml`/`.yml`/`.json`)을 **첨부**하고
-셋업을 요청하세요. `/setup-server` 와 똑같이 미리보기 + `확인 실행` 버튼이 뜹니다.
+**Applying a full template** — call the bot by name (`썩스가재야`) while **attaching** a template file (`.yaml`/`.yml`/`.json`)
+and request the setup. Just like `/setup-server`, you'll get a preview + `확인 실행` (run confirmation) button.
 
 ```
 썩스가재야 이 파일대로 서버 세팅해줘   (+ server-template.yaml 첨부)
 ```
 
-- **운영진(관리자 역할) 또는 서버 주인만** 적용할 수 있습니다(비관리자는 정중히 거부).
-- 공개 채널의 버튼이라 **누르는 사람의 권한도 다시 확인**합니다(아무나 못 누름).
-- 첨부 파일은 **데이터로만** 취급해 파서로만 보냅니다(기억/대화에 저장되지 않음).
-- 트리거되려면 "세팅 / 셋업 / 적용 / 템플릿 / 구성 / 만들어" 같은 **셋업 의도 단어**가 있어야 합니다
-  (그냥 파일만 공유하면 일반 대화로 처리). 파일은 최대 256KB.
+- **Only admins (with an administrator role) or the server owner** can apply it (non-admins are politely refused).
+- Since it's a button in a public channel, **the presser's permissions are re-checked too** (not just anyone can press it).
+- Attached files are treated **as data only** and sent solely to the parser (never stored in memory/conversation).
+- To trigger it, there must be a **setup-intent word** such as "세팅 / 셋업 / 적용 / 템플릿 / 구성 / 만들어" (set up / setup / apply / template / configure / create)
+  (just sharing a file is handled as ordinary conversation). Files can be up to 256KB.
 
-**한두 개만** 만들 거면 파일 없이도 됩니다.
+**For just one or two items**, you don't even need a file.
 
 ```
 썩스가재야 2026-summer 카테고리 만들어줘
@@ -200,4 +201,4 @@ categories:
 썩스가재야 회의 음성 채널 만들어줘
 ```
 
-명확한 요청은 시스템이 자동 실행하고, 정보가 부족하면(이름/종류 등) 봇이 되물어봅니다.
+Clear requests are executed automatically by the system, and if information is missing (name/type, etc.), the bot asks back.

@@ -16,11 +16,11 @@ class IncomingMessage:
     # Forward seam: the S3 NL-router chokepoint will check these against admin_role_id; the
     # slash-command chokepoint reads the interaction's roles directly.
     role_ids: frozenset[int] = frozenset()
-    # 길드 주인은 항상 관리 권한 보유(디스코드 owner는 본래 모든 권한). 어댑터에서 판정해 채움.
+    # The guild owner always holds admin authority (a Discord owner inherently has every permission). Resolved and filled by the adapter.
     is_owner: bool = False
-    # 메시지가 발생한 길드 id (멀티길드 격리의 단일 소스). DM이면 어댑터가 메시지를 무시하므로 항상 채워짐.
+    # Id of the guild where the message originated (the single source for multi-guild isolation). Always filled, since the adapter ignores DMs.
     guild_id: int | None = None
-    # per-guild authz (멀티길드): 이 길드의 설정 관리역할(0=미설정→권한 폴백) + 호출자 Manage Guild/Admin 권한.
+    # per-guild authz (multi-guild): this guild's configured admin role (0=unset→permission fallback) + the caller's Manage Guild/Admin permission.
     admin_role_id: int = 0
     has_manage_guild: bool = False
 
@@ -49,10 +49,10 @@ class AuthContext:
     author_id: str
     author_name: str
     role_ids: frozenset[int] = frozenset()
-    is_owner: bool = False  # 길드 주인 여부 — True면 역할과 무관하게 관리자 (디스코드 owner = 모든 권한)
-    guild_id: int | None = None  # 명령이 향하는 길드 (멀티길드: 고정 guild_id 대신 컨텍스트에서)
-    admin_role_id: int = 0  # 이 길드의 설정 관리역할 (0=미설정 → has_manage_guild 폴백)
-    has_manage_guild: bool = False  # 호출자가 디스코드 Manage Guild/Administrator 보유 (어댑터 판정)
+    is_owner: bool = False  # whether the caller is the guild owner — if True, an admin regardless of roles (a Discord owner = all permissions)
+    guild_id: int | None = None  # the guild the command targets (multi-guild: from context instead of a fixed guild_id)
+    admin_role_id: int = 0  # this guild's configured admin role (0=unset → has_manage_guild fallback)
+    has_manage_guild: bool = False  # whether the caller holds Discord Manage Guild/Administrator (resolved by the adapter)
 
 
 @dataclass(frozen=True)
@@ -73,11 +73,12 @@ def is_admin(
     is_owner: bool = False,
     has_manage_guild: bool = False,
 ) -> bool:
-    """InvokerCheck predicate (ralplan S2 / 멀티길드 G1): 길드 주인은 항상 통과(디스코드 owner는
-    본래 모든 권한). 그 외에는 — 해당 길드에 관리역할이 설정돼 있으면(admin_role_id>0) 그 역할
-    보유 여부로만 판정하고, 관리역할이 미설정(admin_role_id<=0)인 길드에서만 디스코드 Manage
-    Guild/Administrator 권한을 폴백으로 인정한다. 폴백을 미설정 길드로 한정해 기존(시드) 길드의
-    역할 기반 보안 모델을 그대로 보존한다."""
+    """InvokerCheck predicate (ralplan S2 / multi-guild G1): the guild owner always passes (a Discord
+    owner inherently has every permission). Otherwise — if the guild has a configured admin role
+    (admin_role_id>0), the decision rests solely on holding that role; only in guilds where the admin
+    role is unset (admin_role_id<=0) is the Discord Manage Guild/Administrator permission accepted as a
+    fallback. Limiting the fallback to unset guilds preserves the role-based security model of existing
+    (seed) guilds exactly as before."""
     if is_owner:
         return True
     if admin_role_id > 0:
@@ -90,7 +91,7 @@ MentionHandler = Callable[[IncomingMessage, list["BufferedMessage"]], Awaitable[
 
 
 class ChatPlatform(Protocol):
-    """Isolation boundary for the chat library (DESIGN.md §3).
+    """Isolation boundary for the chat library (ARCHITECTURE.md §3).
 
     Only implementations of this Protocol import `discord`. The orchestrator and memory
     engine depend on this interface, so swapping the library (or platform) is local to here.
@@ -168,7 +169,7 @@ class GuildAdmin(Protocol):
         self, guild_id: int, channel_id: int, count: int, *, reason: str
     ) -> int: ...
 
-    # 읽기 전용 — 템플릿 멱등성/정리(cleanup) 계획에 사용 (audit reason 불필요).
+    # Read-only — used for template idempotency / cleanup planning (no audit reason needed).
     # list_roles[]: id, name, member_count, managed, is_default
     # list_channels[]: id, name, type, parent_id, last_message_id, overwrite_role_ids
     async def list_roles(self, guild_id: int) -> list[dict]: ...

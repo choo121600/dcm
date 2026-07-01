@@ -1,14 +1,16 @@
-"""단일 전용-스레드 SQLite serializer (R1).
+"""Single dedicated-thread SQLite serializer (R1).
 
-sqlite3 connection 은 생성 스레드에 귀속(thread-affinity)된다 — 스레드 풀(to_thread)이나
-여러 스레드에서 공유하면 ProgrammingError/손상 위험이 있다. 따라서 connection 을 단일 워커
-스레드 '안에서' 생성하고, 모든 op(쓰기·읽기)를 thread-safe `queue.Queue` 로 전달해 직렬
-실행한다 → 락 경합/`database is locked` 구조적 부재.
+A sqlite3 connection has thread-affinity to its creating thread — sharing it across a thread pool
+(to_thread) or multiple threads risks ProgrammingError/corruption. So the connection is created
+'inside' a single worker thread, and every op (write/read) is passed via a thread-safe
+`queue.Queue` for serial execution → lock contention / `database is locked` are structurally
+absent.
 
-`asyncio.Queue` 는 이벤트루프에 귀속돼 외부 스레드에서 .get()/.put() 이 안전하지 않으므로
-사용하지 않는다. 결과가 필요한 read 는 `concurrent.futures.Future` 로 교차한다(호출 스레드가
-.result() 로 잠깐 블록 — 기존 동기 sqlite read 와 동일 패턴). 쓰기는 fire-and-forget 으로
-즉시 반환(핫패스 비블로킹).
+`asyncio.Queue` is not used because it is bound to the event loop and .get()/.put() from an
+external thread is not safe. Reads that need a result are handed back via a
+`concurrent.futures.Future` (the calling thread blocks briefly on .result() — the same pattern as
+an ordinary synchronous sqlite read). Writes return immediately as fire-and-forget (non-blocking
+on the hot path).
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from typing import Callable
 
 log = logging.getLogger(__name__)
 
-_STOP = object()  # 종료 sentinel (큐 FIFO 로 선행 op 모두 처리 후 종료 → drain)
+_STOP = object()  # stop sentinel (queue FIFO processes all preceding ops, then stops → drain)
 
 
 class SqliteWriter:
@@ -41,7 +43,7 @@ class SqliteWriter:
         self._thread.start()
 
     def submit(self, fn: Callable[[sqlite3.Connection], object], *, wait: bool):
-        """op 를 워커 스레드에 제출. wait=True 면 결과를 받을 때까지 블록."""
+        """Submit an op to the worker thread. If wait=True, block until the result is available."""
         if self._stopped:
             raise RuntimeError("SqliteWriter is stopped")
         if wait:
@@ -82,7 +84,7 @@ class SqliteWriter:
         conn.close()
 
     def stop(self, *, timeout: float = 5.0) -> None:
-        """그레이스풀 종료: sentinel 을 큐 끝에 넣어 선행 op 를 모두 drain 후 종료(R2)."""
+        """Graceful shutdown: enqueue the sentinel at the tail to drain all preceding ops before stopping (R2)."""
         if self._stopped:
             return
         self._stopped = True

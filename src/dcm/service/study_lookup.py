@@ -1,11 +1,15 @@
-"""현재 스터디 상세 문서 온디맨드 읽기 (discord-free).
+"""On-demand reading of the current study's detail docs (discord-free).
 
-전체 커리큘럼을 시스템 프롬프트에 상주시키면 매 메시지마다 토큰이 크게 든다. 대신
-프롬프트에는 스터디 목록+링크만 두고, 사용자가 특정 스터디를 '깊이' 물을 때만 그 문서
-(GitHub 원문 mdx)를 읽어와 그 메시지에만 컨텍스트로 주입한다.
-- 얕은 질문(무슨 스터디 있어 / 멘토 누구 / 언제)은 인덱스로 답 → 문서 안 읽음.
-- 깊은 질문(커리큘럼 / 뭐 배워 / 계획)일 때만 해당 문서 1건을 읽음(전체 문서 매번 X).
-결과는 캐시하고, 실패하면 조용히 None(요약+링크로 폴백). 참가자 명단(PII)은 제외.
+Keeping the entire curriculum resident in the system prompt costs a lot of tokens per message.
+Instead, the prompt holds only the study list + links, and only when a user asks about a specific
+study 'in depth' do we fetch that doc (the raw GitHub mdx) and inject it as context for that message
+only.
+- Shallow questions (what studies are there / who's the mentor / when) are answered from the index →
+  the doc is not read.
+- Only for deep questions (curriculum / what will I learn / plan) is that single doc read (not every
+  doc every time).
+The result is cached, and on failure it silently returns None (falling back to summary + link). The
+participant roster (PII) is excluded.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import urllib.request
 
 _RAW_BASE = "https://raw.githubusercontent.com/SUSC-KR/susc/main/src/content/study/"
 
-# 스터디 키워드(소문자) → mdx 파일명 (현재 26 Summer 라인업).
+# Study keywords (lowercase) → mdx filename (current 26 Summer lineup).
 _STUDY_FILES: list[tuple[tuple[str, ...], str]] = [
     (("알고리즘 초급", "알고리즘(초급)", "알고리즘초급", "알고초급", "algorithm_basic"), "summer_algorithm_basic.mdx"),
     (("알고리즘 중급", "알고리즘(중급)", "알고리즘중급", "알고중급", "algorithm_mid"), "summer_algorithm_mid.mdx"),
@@ -28,7 +32,7 @@ _STUDY_FILES: list[tuple[tuple[str, ...], str]] = [
     (("llm 실무", "llm 스터디", "엘엘엠", "llm,"), "summer_llm.mdx"),
 ]
 
-# '깊이(커리큘럼/계획/내용)' 신호 — 이게 있어야 문서를 읽는다. 멘토/시간은 인덱스로 답하므로 제외.
+# 'Depth (curriculum/plan/content)' signals — the doc is read only if one is present. Mentor/time are answered from the index, so excluded.
 _DETAIL_CUES = (
     "커리큘럼", "커리", "계획", "일정", "주차", "몇 주", "배우", "배워", "배울", "내용",
     "자세", "설명", "목표", "어떻게", "진행", "알려", "궁금", "뭐 하", "뭐해", "뭐 배", "무엇",
@@ -36,7 +40,7 @@ _DETAIL_CUES = (
 
 
 def match_study(text: str) -> str | None:
-    """텍스트에 특정 스터디 키워드가 있으면 그 mdx 파일명, 없으면 None."""
+    """If the text contains a specific study keyword, the corresponding mdx filename; otherwise None."""
     low = (text or "").lower()
     for keywords, filename in _STUDY_FILES:
         if any(k in low for k in keywords):
@@ -50,7 +54,7 @@ def wants_detail(text: str) -> bool:
 
 
 def _strip_frontmatter(mdx: str) -> str:
-    """프런트매터(--- ... ---; memberNameList 등 PII 포함)를 떼고 본문만 반환."""
+    """Strip the frontmatter (--- ... ---; contains PII like memberNameList) and return only the body."""
     s = mdx.lstrip()
     if s.startswith("---"):
         end = s.find("\n---", 3)
@@ -60,7 +64,7 @@ def _strip_frontmatter(mdx: str) -> str:
 
 
 class StudyLookup:
-    """스터디 상세 문서를 GitHub 원문에서 온디맨드로 읽어오는 조회기(캐시 + fail-open)."""
+    """Looks up study detail docs on demand from the raw GitHub source (cached + fail-open)."""
 
     def __init__(self, *, timeout: float = 6.0, max_chars: int = 2500) -> None:
         self._timeout = timeout
@@ -73,7 +77,7 @@ class StudyLookup:
             return resp.read().decode("utf-8")
 
     async def maybe_fetch(self, text: str) -> str | None:
-        """메시지가 특정 스터디를 '깊이' 물을 때만 그 문서 본문을 반환. 아니면 None(문서 안 읽음)."""
+        """Returns the doc body only when the message asks about a specific study 'in depth'. Otherwise None (doc not read)."""
         filename = match_study(text)
         if not filename or not wants_detail(text):
             return None
@@ -81,7 +85,7 @@ class StudyLookup:
             return self._cache[filename]
         try:
             raw = await asyncio.to_thread(self._blocking_fetch, filename)
-        except Exception:  # noqa: BLE001 - 조회 실패는 조용히 폴백(요약+링크로)
+        except Exception:  # noqa: BLE001 - a lookup failure silently falls back (to summary + link)
             return None
         body = _strip_frontmatter(raw)[: self._max_chars]
         if body:

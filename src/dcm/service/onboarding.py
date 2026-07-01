@@ -1,16 +1,18 @@
-"""S6 온보딩 정책 — discord-free.
+"""S6 onboarding policy — discord-free.
 
-신규 멤버 입장 시 welcome 메시지 전송 여부와 자동 역할 부여 여부를 결정한다.
-discord 의존 없이 순수 Python 데이터만 다루므로 단위 테스트가 오프라인으로 가능하다.
+Decides whether to send a welcome message and whether to auto-assign a role when a new member joins.
+Since it handles only pure Python data with no discord dependency, unit tests can run offline.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..i18n import t
+
 
 @dataclass(frozen=True)
 class OnboardingDecision:
-    """decide() 반환값. 채널/역할이 None이면 해당 동작을 스킵한다."""
+    """Return value of decide(). If channel/role is None, that action is skipped."""
 
     welcome_text: str | None
     welcome_channel_id: int | None
@@ -18,12 +20,12 @@ class OnboardingDecision:
 
 
 class OnboardingPolicy:
-    """온보딩 설정 보유 및 입장 결정 생성.
+    """Holds onboarding settings and produces join decisions.
 
     Args:
-        welcome_channel_id: 웰컴 메시지를 보낼 채널 ID. None이면 메시지 스킵.
-        welcome_message:    웰컴 텍스트 템플릿. `{name}` 플레이스홀더를 멤버 표시 이름으로 치환한다.
-        default_role_id:    신규 멤버에게 자동 부여할 역할 ID. None이면 스킵.
+        welcome_channel_id: Channel ID to send the welcome message to. None skips the message.
+        welcome_message:    Welcome text template. The `{name}` placeholder is replaced with the member's display name.
+        default_role_id:    Role ID to auto-assign to new members. None skips.
     """
 
     def __init__(
@@ -31,10 +33,10 @@ class OnboardingPolicy:
         *,
         settings=None,
         welcome_channel_id: int | None = None,
-        welcome_message: str = "환영합니다! 편하게 인사하고 대화해요 :)",
+        welcome_message: str = "",  # empty → locale default (i18n onboarding.welcome_default)
         default_role_id: int | None = None,
     ) -> None:
-        self._settings = settings  # GuildSettingsStore (멀티길드); None이면 전역값 사용(하위호환)
+        self._settings = settings  # GuildSettingsStore (multi-guild); None uses the global values (backward compatible)
         self._welcome_channel_id = welcome_channel_id
         self._welcome_message = welcome_message
         self._default_role_id = default_role_id
@@ -42,10 +44,10 @@ class OnboardingPolicy:
     def decide(
         self, member_display_name: str, guild_id: int | str | None = None
     ) -> OnboardingDecision:
-        """입장 시 취할 동작을 결정한다. 멀티길드: settings + guild_id 가 있으면 그 길드 설정을,
-        없으면 생성자 주입 전역값(하위호환)을 사용한다.
+        """Decides the action to take on join. Multi-guild: if settings + guild_id are present, use that
+        guild's settings; otherwise use the constructor-injected global values (backward compatible).
 
-        welcome 채널이 설정돼 있으면 welcome_text 생성(없으면 스킵). default_role 설정 시 역할 포함.
+        If a welcome channel is set, produce welcome_text (skip otherwise). If default_role is set, include the role.
         """
         channel_id = self._welcome_channel_id
         message = self._welcome_message
@@ -57,7 +59,9 @@ class OnboardingPolicy:
             role_id = s.default_role_id
 
         if channel_id is not None:
-            # {name} 플레이스홀더만 안전 치환. 포맷 오류는 원본 템플릿으로 안전 fallback.
+            # Fall back to the active locale's default greeting when none is configured (§10).
+            message = message or t("onboarding.welcome_default")
+            # Safely substitute only the {name} placeholder. On format error, safely fall back to the original template.
             try:
                 text: str | None = message.format(name=member_display_name)
             except Exception:

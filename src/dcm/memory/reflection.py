@@ -53,7 +53,7 @@ async def run_reflection(
     min_episodics: int,
     model: str | None = None,
 ) -> dict[str, int]:
-    """Consolidate episodics into semantic + self memories — growth (DESIGN.md §5.6)."""
+    """Consolidate episodics into semantic + self memories — growth (ARCHITECTURE.md §5.6)."""
     episodics = store.episodic_memories()
     groups: dict[str, list] = {}
     for mem in episodics:

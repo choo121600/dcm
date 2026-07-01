@@ -1,0 +1,35 @@
+cleanup:
+  # 채널 한 줄 표기.
+  no_messages: "메시지 없음"
+  days_ago: "{days:.0f}일 전"
+  chan_line: "  • #{name} (마지막 활동 {age})"
+
+  # 전체 정리 현황 리포트 (summary).
+  report_header: "🧹 정리 현황 (비활성 기준 {days}일)"
+  report_archive_section: "\n📦 아카이브로 옮길 비활성 채널: {count}개"
+  report_purge_section: "\n🔥 이미 아카이브에 있어 퍼지(삭제)될 채널: {count}개"
+  report_roles_section: "\n🗑️ 퍼지 때 삭제될 고아 역할: {count}개"
+  report_categories_section: "\n🗂️ 퍼지 때 삭제될 빈 카테고리: {count}개"
+  report_more: "  …외 {count}개"
+  report_commands: "\n명령: /cleanup-archive (이동·되돌림 가능) → /cleanup-purge (영구 삭제)"
+
+  # 목록 항목.
+  chan_bullet: "  • #{name}"
+  role_bullet: "  • @{name} ({reason})"
+  cat_bullet: "  • {name}"
+
+  # 아카이브 미리보기 (archive_summary).
+  archive_none: "아카이브로 옮길 비활성 채널이 없어 ✅"
+  archive_header: "📦 아카이브로 옮길 채널 {count}개 (멤버에게 숨김, 되돌림 가능):"
+
+  # 퍼지 미리보기 (purge_summary).
+  purge_none: "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅"
+  purge_header: "🔥 영구 삭제 (되돌릴 수 없음):"
+  purge_channels_section: "\n아카이브 채널 {count}개:"
+  purge_roles_section: "\n고아 역할 {count}개:"
+  purge_categories_section: "\n빈 카테고리 {count}개:"
+
+  # 역할 삭제 사유 (RoleAction.reason).
+  reason_dead_channel: "죽은 채널 전용·멤버 {mc}명"
+  reason_no_members: "멤버 0명·미사용"
+  reason_unused_member: "채널 미사용·멤버 {mc}명(비기수)"

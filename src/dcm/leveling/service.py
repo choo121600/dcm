@@ -1,11 +1,12 @@
-"""LevelingService — 핫패스 XP 적립 + 표시(embed) + (G003/G004에서 게이팅·역할).
+"""LevelingService — hot-path XP accrual + display (embed) + (gating/roles in G003/G004).
 
-record_message 는 on_message 핫패스에서 호출된다. 핫패스 DB READ 0 (steady state) 를 위해:
-- 쿨다운은 인메모리 per-(guild,user) dict 1차 게이트(P1/F6).
-- per-guild 설정(leveling_enabled/cooldown/top_n)은 read-through TTL 캐시로 보관해, 캐시 히트
-  시 guild_settings SQLite read 가 발생하지 않는다(캐시 미스 시에만 TTL 당 1회 read).
-어떤 실패도 침묵 degrade(멘션 경로·봇 동작 영향 0). 쿨다운 dict 는 주기적으로 stale 엔트리를
-sweep 해 무한 증가를 막는다.
+record_message is called on the on_message hot path. To keep 0 hot-path DB READs (steady state):
+- Cooldown is a first-stage gate via an in-memory per-(guild,user) dict (P1/F6).
+- Per-guild settings (leveling_enabled/cooldown/top_n) are held in a read-through TTL cache, so
+  on a cache hit no guild_settings SQLite read happens (only a cache miss triggers one read per
+  TTL).
+Any failure degrades silently (0 impact on the mention path or bot behavior). The cooldown dict
+periodically sweeps stale entries to prevent unbounded growth.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from collections.abc import Callable
 
 import discord
 
+from ..i18n import t
 from .scoring import (
     caps_ratio,
     danger_score,
@@ -32,20 +34,20 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN_SECONDS = 60.0
 DEFAULT_TOP_N = 10
-SETTINGS_CACHE_TTL = 60.0  # per-guild 설정 캐시 수명(초, monotonic) — 변경은 이 시간 내 전파
-_EVICT_THRESHOLD = 5_000  # _last_award 가 이 크기를 넘으면 stale 엔트리 sweep
-_EVICT_MAX_AGE = 3_600.0  # 이보다 오래된 쿨다운 엔트리는 안전 제거(어떤 쿨다운도 지났음)
-# 신뢰-하락(decay) 핫패스 파라미터 (인메모리, 코드 기본값).
-FLOOD_WINDOW_SECONDS = 10.0  # 플러딩 카운트용 슬라이딩 윈도 길이(초)
-PENALTY_WINDOW_SECONDS = 60.0  # 페널티 빈도 cap 윈도 길이(초)
-PENALTY_WINDOW_CAP = 3  # 윈도 내 최대 페널티 횟수(오탐/게이밍 방지)
-PENALTY_DAILY_CAP = 20  # 일일 최대 페널티 횟수(UTC-day)
-LEVEL_ROLE_HYSTERESIS = 1  # 강등 시 reward_level - 이 마진 '미만'에서만 역할 회수(경계 플랩 억제)
+SETTINGS_CACHE_TTL = 60.0  # per-guild settings cache lifetime (seconds, monotonic) — changes propagate within this time
+_EVICT_THRESHOLD = 5_000  # sweep stale entries once _last_award exceeds this size
+_EVICT_MAX_AGE = 3_600.0  # cooldown entries older than this are safe to remove (any cooldown has elapsed)
+# trust-decay hot-path parameters (in-memory, code defaults).
+FLOOD_WINDOW_SECONDS = 10.0  # sliding-window length for flood counting (seconds)
+PENALTY_WINDOW_SECONDS = 60.0  # window length for the penalty-frequency cap (seconds)
+PENALTY_WINDOW_CAP = 3  # max penalties within the window (guards against false positives / gaming)
+PENALTY_DAILY_CAP = 20  # max penalties per day (UTC-day)
+LEVEL_ROLE_HYSTERESIS = 1  # on demotion, revoke only 'below' reward_level minus this margin (dampens boundary flapping)
 _EMBED_COLOR = 0x5865F2  # Discord blurple
-# 신뢰 게이팅 쿼터 티어(코드 기본값): (최소 레벨, 일일 한도). 레벨에서 파생.
+# trust-gating quota tiers (code defaults): (min level, daily limit). Derived from level.
 WEB_QUOTA_TIERS = ((0, 20), (5, 50), (10, 100))
 LLM_QUOTA_TIERS = ((0, 100), (5, 300), (10, 600))
-# 명시적 '위험' 권한(거부 사유 dangerous:* 라벨). 아래 SAFE allow-list 와 함께 fail-closed 동작.
+# explicit 'dangerous' permissions (denial reason labeled dangerous:*). Fail-closed together with the SAFE allow-list below.
 DANGEROUS_PERMISSION_NAMES = (
     "administrator",
     "manage_guild",
@@ -70,8 +72,9 @@ DANGEROUS_PERMISSION_NAMES = (
     "priority_speaker",
 )
 
-# fail-closed allow-list: 무인 자동부여 역할은 아래 '안전' 권한 외 어떤 권한이라도 가지면 거부한다.
-# (단순 deny-list 가 아님 — 알 수 없는/미래 Discord 권한도 SAFE 에 없으면 자동 거부.)
+# fail-closed allow-list: an unattended auto-grant role is denied if it holds any permission
+# outside the 'safe' set below. (Not a simple deny-list — unknown/future Discord permissions are
+# auto-denied too unless present in SAFE.)
 SAFE_PERMISSION_NAMES = frozenset(
     {
         "view_channel", "read_messages", "read_message_history",
@@ -89,7 +92,7 @@ SAFE_PERMISSION_NAMES = frozenset(
 
 
 def _all_permission_names() -> set[str]:
-    """검사할 권한 이름 = 명시적 위험 + (가능하면) Discord 전체 플래그(fail-closed 보장)."""
+    """Permission names to check = explicit dangerous ones + (if available) all Discord flags (ensures fail-closed)."""
     names = set(DANGEROUS_PERMISSION_NAMES)
     valid = getattr(discord.Permissions, "VALID_FLAGS", None)
     if isinstance(valid, dict):
@@ -110,16 +113,16 @@ class LevelingService:
         self._settings = settings_store
         self._default_cooldown = float(default_cooldown)
         self._default_top_n = int(default_top_n)
-        # 인메모리 쿨다운: (guild_id, user_id) -> monotonic 마지막 적립 시각.
+        # in-memory cooldown: (guild_id, user_id) -> monotonic time of the last award.
         self._last_award: dict[tuple[str, str], float] = {}
-        # per-guild 설정 read-through 캐시: guild_id -> (fetched_monotonic, settings|None).
+        # per-guild settings read-through cache: guild_id -> (fetched_monotonic, settings|None).
         self._settings_cache: dict[str, tuple[float, object]] = {}
-        # 신뢰-하락(decay) 인메모리 카운터 — 핫패스 DB read 0 유지(단일 event-loop 스레드 가정).
-        self._flood: dict[tuple[str, str], deque] = {}  # 메시지 timestamp 슬라이딩 윈도
-        self._penalty_window: dict[tuple[str, str], deque] = {}  # 페널티 timestamp 윈도(cap)
-        self._penalty_daily: dict[tuple[str, str, str], int] = {}  # (guild,user,utc_day)->횟수
+        # trust-decay in-memory counters — keep 0 hot-path DB reads (assumes a single event-loop thread).
+        self._flood: dict[tuple[str, str], deque] = {}  # sliding window of message timestamps
+        self._penalty_window: dict[tuple[str, str], deque] = {}  # window of penalty timestamps (cap)
+        self._penalty_daily: dict[tuple[str, str, str], int] = {}  # (guild,user,utc_day)->count
 
-    # --- per-guild 설정 (TTL 캐시 + 실패 시 기본값 degrade) ---
+    # --- per-guild settings (TTL cache + degrade to defaults on failure) ---
 
     def _cached_settings(self, guild_id, mono: float):
         if self._settings is None:
@@ -157,22 +160,22 @@ class LevelingService:
     @staticmethod
     def _decay_enabled(settings) -> bool:
         en = getattr(settings, "leveling_decay_enabled", None) if settings is not None else None
-        return False if en is None else bool(en)  # 기본 OFF(보수적 출시)
+        return False if en is None else bool(en)  # default OFF (conservative rollout)
 
     @staticmethod
     def _decay_shadow(settings) -> bool:
         sh = getattr(settings, "leveling_decay_shadow", None) if settings is not None else None
-        return False if sh is None else bool(sh)  # 기본 enforce(decay 활성 시 실제 차감)
+        return False if sh is None else bool(sh)  # default enforce (actually deducts when decay is enabled)
 
     @staticmethod
     def _danger_enabled(settings) -> bool:
         v = getattr(settings, "leveling_danger_enabled", None) if settings is not None else None
-        return False if v is None else bool(v)  # 기본 OFF(위험 워드리스트 비활성)
+        return False if v is None else bool(v)  # default OFF (danger wordlist disabled)
 
     @staticmethod
     def _injection_enabled(settings) -> bool:
         v = getattr(settings, "leveling_injection_enabled", None) if settings is not None else None
-        return False if v is None else bool(v)  # 기본 OFF(인젝션 신호 비활성)
+        return False if v is None else bool(v)  # default OFF (injection signal disabled)
 
     def _maybe_evict(self, mono: float) -> None:
         if (
@@ -184,17 +187,17 @@ class LevelingService:
             return
         cutoff = mono - _EVICT_MAX_AGE
         self._last_award = {k: v for k, v in self._last_award.items() if v >= cutoff}
-        # decay 윈도 deque: 최근 활동이 stale 한 엔트리 제거.
+        # decay window deques: drop entries whose most recent activity is stale.
         self._flood = {k: dq for k, dq in self._flood.items() if dq and dq[-1] >= cutoff}
         self._penalty_window = {
             k: dq for k, dq in self._penalty_window.items() if dq and dq[-1] >= cutoff
         }
-        # 일일 페널티 카운터: 오늘(최신 utc_day) 외 엔트리 제거.
+        # daily penalty counters: drop entries other than today (latest utc_day).
         if self._penalty_daily:
             today = max(day for _, _, day in self._penalty_daily)
             self._penalty_daily = {k: v for k, v in self._penalty_daily.items() if k[2] == today}
 
-    # --- 핫패스 ---
+    # --- hot path ---
 
     def record_message(
         self,
@@ -208,9 +211,11 @@ class LevelingService:
         is_admin: bool = False,
         on_penalty: Callable[[], None] | None = None,
     ) -> bool:
-        """비봇 메시지에 질-가중 XP 적립. 인메모리 쿨다운 1차 게이트 + 설정 TTL 캐시(핫패스 DB READ 0).
+        """Award quality-weighted XP for a non-bot message. In-memory cooldown as first-stage gate
+        + settings TTL cache (0 hot-path DB READs).
 
-        반환: XP 가 적립되면 True, (비활성/쿨다운/무가치) skip 이면 False. 예외는 침묵 degrade.
+        Returns: True if XP was awarded, False if skipped (disabled/cooldown/worthless).
+        Exceptions degrade silently.
         """
         try:
             mono = monotonic_time if monotonic_time is not None else time.monotonic()
@@ -218,10 +223,10 @@ class LevelingService:
             if not self._enabled(settings):
                 return False
             key = (str(guild_id), str(user_id))
-            # 신뢰-하락: 플러딩 카운터는 쿨다운 게이트 前 갱신(인메모리, DB read 0).
+            # trust-decay: update the flood counter before the cooldown gate (in-memory, 0 DB reads).
             if not is_admin and self._decay_enabled(settings):
                 flood_count = self._record_flood(key, mono)
-                self._maybe_evict(mono)  # 비적립 트래픽도 decay 맵 stale sweep 트리거
+                self._maybe_evict(mono)  # non-awarding traffic also triggers a stale sweep of the decay maps
                 penalty = penalty_weight(text, flood_count, mention_count, caps_ratio(text))
                 danger = danger_score(text) if self._danger_enabled(settings) else 0
                 penalty += danger
@@ -233,14 +238,14 @@ class LevelingService:
                         guild_id, user_id, key, penalty, mono, now, settings, signals=signals
                     ):
                         if on_penalty is not None:
-                            on_penalty()  # 강등 가능 → 백그라운드 reconcile(역할 회수) 트리거(P2)
-                        return False  # 페널티가 실제 차감되면 이 메시지는 적립하지 않음
+                            on_penalty()  # possible demotion -> trigger background reconcile (role revocation) (P2)
+                        return False  # if the penalty is actually deducted, this message earns no XP
             last = self._last_award.get(key)
             if last is not None and mono - last < self._cooldown(settings):
                 return False
             xp = xp_award(text)
             if xp <= 0:
-                return False  # 빈/무가치 메시지는 쿨다운 소비 없이 skip
+                return False  # empty/worthless messages are skipped without consuming the cooldown
             self._last_award[key] = mono
             self._maybe_evict(mono)
             wall = now if now is not None else time.time()
@@ -251,7 +256,7 @@ class LevelingService:
             return False
 
     def _record_flood(self, key: tuple[str, str], mono: float) -> int:
-        """슬라이딩 윈도(FLOOD_WINDOW_SECONDS) 내 메시지 수 — 인메모리만(DB read 0)."""
+        """Number of messages within the sliding window (FLOOD_WINDOW_SECONDS) — in-memory only (0 DB reads)."""
         dq = self._flood.get(key)
         if dq is None:
             dq = deque()
@@ -274,10 +279,12 @@ class LevelingService:
         *,
         signals: str,
     ) -> bool:
-        """신뢰-하락 페널티 적용. 윈도/일일 cap·shadow 가드. 실제 차감 시 True(전량 audit).
+        """Apply a trust-decay penalty. Window/daily cap and shadow guards. Returns True when a
+        deduction actually happens (all audited).
 
-        반환 True = weighted_xp 를 실제 차감(이 메시지는 적립 skip). False = shadow/cap 으로 미차감.
-        DB read 0 — 인메모리 cap + fire-and-forget add_xp(write)만 사용.
+        Returns True = weighted_xp is actually deducted (this message skips its award).
+        False = not deducted due to shadow/cap. 0 DB reads — uses only an in-memory cap plus a
+        fire-and-forget add_xp (write).
         """
         pw = self._penalty_window.get(key)
         if pw is None:
@@ -287,12 +294,12 @@ class LevelingService:
         while pw and pw[0] < cutoff:
             pw.popleft()
         if len(pw) >= PENALTY_WINDOW_CAP:
-            return False  # 윈도 cap 초과 — 추가 차감 안 함
+            return False  # window cap exceeded — no further deduction
         wall = now if now is not None else time.time()
         day = utc_day(wall)
         dkey = (key[0], key[1], day)
         if self._penalty_daily.get(dkey, 0) >= PENALTY_DAILY_CAP:
-            return False  # 일일 cap 초과
+            return False  # daily cap exceeded
 
         if self._decay_shadow(settings):
             log.info(
@@ -324,10 +331,11 @@ class LevelingService:
         signal: str,
         now: float | None = None,
     ) -> bool:
-        """비핫패스(ingest 등) 신호 기반 신뢰-하락 페널티(인젝션/위험).
+        """Non-hot-path (e.g. ingest) signal-based trust-decay penalty (injection/danger).
 
-        decay + 신호별 토글 활성 시에만, 윈도/일일 cap·shadow·audit 를 _apply_penalty 로 공유한다.
-        핫패스 아님 — settings 캐시 read 허용. 반환 True = 실제 차감.
+        Only when decay + the per-signal toggle are enabled; shares the window/daily cap, shadow,
+        and audit path via _apply_penalty. Not a hot path — settings cache read is allowed.
+        Returns True = actually deducted.
         """
         try:
             if int(penalty_xp) >= 0:
@@ -355,7 +363,7 @@ class LevelingService:
             log.exception("leveling apply_signal_penalty failed (silent)")
             return False
 
-    # --- 신뢰 게이팅 (G003/G004): 레벨별 일일 한도 ---
+    # --- trust gating (G003/G004): per-level daily limits ---
 
     @staticmethod
     def _quota_limit(kind: str, lvl: int) -> int:
@@ -369,10 +377,11 @@ class LevelingService:
     def quota_check(
         self, guild_id: int | str, user_id: int | str, kind: str, *, day: str | None = None
     ) -> tuple[bool, int]:
-        """레벨 파생 일일 한도 대비 사용량 확인. 반환 (allowed, remaining).
+        """Check usage against the level-derived daily limit. Returns (allowed, remaining).
 
-        allowed=True 면 한도 내. 예외/조회 실패는 fail-open(allow)으로 degrade해 일시 오류가
-        정상 기능을 막지 않게 한다(web 은 별도 쿨다운/비용 가드 존재).
+        allowed=True means within the limit. Exceptions / lookup failures degrade fail-open
+        (allow) so a transient error doesn't block normal features (web has its own separate
+        cooldown/cost guard).
         """
         try:
             xp, _ = self._store.get_record(guild_id, user_id)
@@ -387,18 +396,18 @@ class LevelingService:
     def record_usage(
         self, guild_id: int | str, user_id: int | str, kind: str, *, day: str | None = None
     ) -> None:
-        """성공한 web/llm 사용 1건을 일일 사용량에 반영(실패 침묵)."""
+        """Record one successful web/llm use in the daily usage counter (fails silently)."""
         try:
             d = day or utc_day(time.time())
             self._store.incr_daily_usage(guild_id, user_id, d, kind)
         except Exception:  # noqa: BLE001
             log.exception("leveling record_usage failed (silent)")
 
-    # --- 레벨→역할 보상 (G004): allow-list 무인 부여 ---
+    # --- level-to-role rewards (G004): unattended allow-list grant ---
 
     @staticmethod
     def _role_grant_ok(role, guild, bot_top_position) -> tuple[bool, str]:
-        """무인 자동부여 안전 검사(fail-closed allow-list): 위계 통과 + SAFE 외 권한 0 인 장식 역할만 허용."""
+        """Safety check for unattended auto-grant (fail-closed allow-list): allow only decorative roles that pass the hierarchy check and hold 0 permissions outside SAFE."""
         if getattr(role, "managed", False):
             return (False, "managed")
         default_role = getattr(guild, "default_role", None)
@@ -407,7 +416,7 @@ class LevelingService:
         if bot_top_position is None:
             return (False, "no-bot-top-role")
         if getattr(role, "position", 0) >= bot_top_position:
-            return (False, "hierarchy")  # 봇 최상위 역할 미만(strict)만
+            return (False, "hierarchy")  # only strictly below the bot's top role
         perms = getattr(role, "permissions", None)
         if perms is not None:
             for name in _all_permission_names():
@@ -418,11 +427,13 @@ class LevelingService:
         return (True, "ok")
 
     async def reconcile_roles(self, member) -> None:
-        """멤버 레벨에 맞춰 매핑 역할을 부여(도달)하거나 회수(신뢰 하락, P2)한다.
+        """Grant (on reaching a level) or revoke (on trust decay, P2) the mapped roles according
+        to the member's level.
 
-        allow-list 가드(_role_grant_ok)를 통과하는 보상 역할만 대상 — 온보딩 default_role·
-        managed·위계 초과·위험권한 역할은 구조적으로 제외. 멱등·실패 침묵. 회수는
-        reward_level - LEVEL_ROLE_HYSTERESIS '미만'에서만(경계 플랩 억제).
+        Only reward roles that pass the allow-list guard (_role_grant_ok) are affected —
+        onboarding default_role, managed, over-hierarchy, and dangerous-permission roles are
+        structurally excluded. Idempotent; fails silently. Revocation happens only 'below'
+        reward_level - LEVEL_ROLE_HYSTERESIS (dampens boundary flapping).
         """
         try:
             guild = getattr(member, "guild", None)
@@ -440,12 +451,12 @@ class LevelingService:
             for reward_level, role_id in rewards:
                 role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
                 if role is None:
-                    continue  # 삭제된 역할 skip
+                    continue  # skip deleted role
                 has_role = role in member_roles
                 if lvl >= reward_level:
-                    # 부여(grant): 도달 레벨 역할을 멱등 부여
+                    # grant: idempotently grant the role for the reached level
                     if has_role:
-                        continue  # 멱등: 이미 보유
+                        continue  # idempotent: already held
                     ok, reason = self._role_grant_ok(role, guild, bot_top)
                     if not ok:
                         log.warning(
@@ -466,13 +477,14 @@ class LevelingService:
                             reward_level,
                             role_id,
                         )
-                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException 등)
+                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException etc.)
                         log.exception("leveling add_roles failed (silent degrade)")
                 elif lvl < reward_level - LEVEL_ROLE_HYSTERESIS and has_role:
-                    # 회수(revoke, P2): 신뢰 하락으로 임계 미달 → 봇이 부여 가능한 보상 역할만 회수.
-                    # _role_grant_ok 미통과(managed/everyone/위계/위험권한) 역할은 보존(자동 미회수).
+                    # revoke (P2): fell below threshold due to trust decay → revoke only reward
+                    # roles the bot could grant. Roles failing _role_grant_ok
+                    # (managed/everyone/hierarchy/dangerous-permission) are preserved (not auto-revoked).
                     if onboarding_id is not None and role_id == onboarding_id:
-                        continue  # 온보딩 역할은 보상 매핑돼 있어도 절대 자동 회수 안 함(채널 접근 보존)
+                        continue  # never auto-revoke the onboarding role even if reward-mapped (preserves channel access)
                     ok, _reason = self._role_grant_ok(role, guild, bot_top)
                     if not ok:
                         continue
@@ -487,15 +499,15 @@ class LevelingService:
                             reward_level,
                             role_id,
                         )
-                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException 등)
+                    except Exception:  # noqa: BLE001 (discord.Forbidden/HTTPException etc.)
                         log.exception("leveling remove_roles failed (silent degrade)")
         except Exception:  # noqa: BLE001
             log.exception("reconcile_roles failed (silent degrade)")
 
-    # --- 역할 보상 설정 (admin) ---
+    # --- role reward configuration (admin) ---
 
     def _onboarding_role_id(self, guild_id) -> int | None:
-        """길드의 온보딩(가입 시 부여) default_role_id — 회수/보상 후보에서 제외하기 위함."""
+        """The guild's onboarding (granted on join) default_role_id — used to exclude it from revocation/reward candidates."""
         settings = self._cached_settings(guild_id, time.monotonic())
         rid = getattr(settings, "default_role_id", None) if settings is not None else None
         try:
@@ -504,10 +516,10 @@ class LevelingService:
             return None
 
     def validate_reward_role(self, role, guild) -> tuple[bool, str]:
-        """설정 시점 allow-list 사전검증(부여 시점 가드 + 온보딩 역할 거부)."""
+        """Allow-list pre-validation at configuration time (grant-time guard + onboarding-role rejection)."""
         onboarding_id = self._onboarding_role_id(getattr(guild, "id", None))
         if onboarding_id is not None and getattr(role, "id", None) == onboarding_id:
-            return (False, "onboarding-role")  # 온보딩 역할을 보상으로 매핑 금지(자동 회수 footgun)
+            return (False, "onboarding-role")  # forbid mapping the onboarding role as a reward (auto-revoke footgun)
         bot_member = getattr(guild, "me", None)
         bot_top = getattr(getattr(bot_member, "top_role", None), "position", None)
         return self._role_grant_ok(role, guild, bot_top)
@@ -521,18 +533,20 @@ class LevelingService:
     def list_role_rewards(self, guild_id: int | str) -> list[tuple[int, int]]:
         return self._store.get_role_rewards(guild_id)
 
-    # --- 표시 (embed) ---
+    # --- display (embed) ---
 
     def rank_embed(self, guild_id: int | str, user_id: int | str, display_name: str):
         xp, _ = self._store.get_record(guild_id, user_id)
         lvl = level(xp)
         prog = progress(xp)
         remaining = xp_to_next(xp)
-        embed = discord.Embed(title=f"{display_name} 님의 활동 레벨", color=_EMBED_COLOR)
-        embed.add_field(name="레벨", value=str(lvl), inline=True)
-        embed.add_field(name="총 XP", value=str(xp), inline=True)
+        embed = discord.Embed(title=t("leveling.rank_title", display_name=display_name), color=_EMBED_COLOR)
+        embed.add_field(name=t("leveling.field_level"), value=str(lvl), inline=True)
+        embed.add_field(name=t("leveling.field_total_xp"), value=str(xp), inline=True)
         embed.add_field(
-            name="다음 레벨까지", value=f"{remaining} XP ({int(prog * 100)}%)", inline=True
+            name=t("leveling.field_next_level"),
+            value=t("leveling.next_level_value", remaining=remaining, percent=int(prog * 100)),
+            inline=True,
         )
         return embed
 
@@ -540,11 +554,11 @@ class LevelingService:
         settings = self._cached_settings(guild_id, time.monotonic())
         rows = self._store.leaderboard(guild_id, self._top_n(settings))
         if not rows:
-            desc = "아직 활동 기록이 없어요. 채팅하면 XP가 쌓여요!"
+            desc = t("leveling.leaderboard_empty")
         else:
             lines = []
             for rank, (uid, xp) in enumerate(rows, start=1):
                 name = name_resolver(uid) if name_resolver is not None else f"<@{uid}>"
-                lines.append(f"**{rank}.** {name} — Lv {level(xp)} ({xp} XP)")
+                lines.append(t("leveling.leaderboard_row", rank=rank, name=name, level=level(xp), xp=xp))
             desc = "\n".join(lines)
-        return discord.Embed(title="🏆 활동 리더보드", description=desc, color=_EMBED_COLOR)
+        return discord.Embed(title=t("leveling.leaderboard_title"), description=desc, color=_EMBED_COLOR)

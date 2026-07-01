@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a problem with dcm
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a bug! Please do **not** paste tokens or `.env` values.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I run `/setup-server`, ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant log output (secrets are auto-redacted, but double-check).
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: dcm version / commit
+      placeholder: v0.1.0 or a commit SHA
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.11"
+  - type: input
+    id: locale
+    attributes:
+      label: BOT_LOCALE
+      placeholder: ko

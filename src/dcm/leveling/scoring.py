@@ -1,8 +1,8 @@
-"""레벨링 순수함수 (의존성 0, 정수 XP 도메인).
+"""Leveling pure functions (0 dependencies, integer XP domain).
 
-레벨은 저장하지 않고 누적 XP 에서 조회 시 산정한다(곡선 변경이 데이터 마이그레이션 불필요).
-곡선은 MEE6식: 레벨 n→n+1 로 가는 데 필요한 XP = 5n^2 + 50n + 100.
-정수 도메인으로 운용해 부동소수 경계비교 이슈를 회피한다.
+Levels are not stored but computed on read from cumulative XP (changing the curve needs no data
+migration). The curve is MEE6-style: XP needed to go from level n to n+1 = 5n^2 + 50n + 100.
+Operates in the integer domain to avoid floating-point boundary-comparison issues.
 """
 from __future__ import annotations
 
@@ -10,30 +10,30 @@ import datetime
 import re
 from collections import Counter
 
-# --- XP 적립 휴리스틱 상수 (코드 기본값) ---
+# --- XP-award heuristic constants (code defaults) ---
 BASE_XP = 15
 SHORT_LEN = 8
 SPAM_MIN_LEN = 4
 SPAM_DOMINANCE = 0.70
 
-# 질 가중치
+# quality weights
 W_NORMAL = 1.0
 W_SHORT = 0.3
 W_EMOJI_ONLY = 0.1
 W_SPAM = 0.2
 W_EMPTY = 0.0
 
-# --- 신뢰-하락(penalty) 휴리스틱 상수 (코드 기본값; penalty_weight 는 음수 XP 반환) ---
-FLOOD_THRESHOLD = 5  # 슬라이딩 윈도 내 메시지 수가 이 값을 '초과'하면 플러딩
-MENTION_BURST_MIN = 5  # 한 메시지의 멘션 수가 이 값 이상이면 멘션 폭주
-CAPS_MIN_LEN = 12  # 이 길이 이상일 때만 CAPS 판정(짧은 약어/명령어 보호)
-CAPS_RATIO_THRESHOLD = 0.8  # ASCII 알파벳 중 대문자 비율 임계
+# --- trust-decay (penalty) heuristic constants (code defaults; penalty_weight returns negative XP) ---
+FLOOD_THRESHOLD = 5  # flooding when the message count within the sliding window 'exceeds' this value
+MENTION_BURST_MIN = 5  # a mention burst when a single message has at least this many mentions
+CAPS_MIN_LEN = 12  # only judge CAPS at or above this length (protects short acronyms/commands)
+CAPS_RATIO_THRESHOLD = 0.8  # threshold uppercase ratio among ASCII letters
 PENALTY_FLOOD = -30
 PENALTY_MENTION_BURST = -25
 PENALTY_CAPS = -10
 PENALTY_DANGER = -50
-PENALTY_INJECTION = -60  # 인젝션 신호 페널티(2차; ingest 경로, 게이팅·cap·shadow 는 service)
-# 위험(스캠/피싱) 콘텐츠 보수적 마커. 길드 opt-in(기본 off)·shadow 권장 — 명백한 디스코드 스캠만 본다.
+PENALTY_INJECTION = -60  # injection-signal penalty (secondary; ingest path, gating/cap/shadow handled in service)
+# conservative markers for dangerous (scam/phishing) content. Guild opt-in (off by default), shadow recommended — only obvious Discord scams are matched.
 DANGER_MARKERS = (
     "free nitro",
     "free discord nitro",
@@ -48,14 +48,14 @@ DANGER_MARKERS = (
     "공짜 니트로",
 )
 
-_WORD_RE = re.compile(r"[^\W_]", re.UNICODE)  # 알파벳/숫자/유니코드 단어문자 1개 이상
+_WORD_RE = re.compile(r"[^\W_]", re.UNICODE)  # one or more alphanumeric/Unicode word characters
 _WS_RE = re.compile(r"\s+")
 
 
 def quality_weight(text: str) -> float:
-    """메시지 '질' 가중치 [0,1] — LLM 호출 없이 길이/구성만으로 판정.
+    """Message 'quality' weight [0,1] — judged from length/composition alone, no LLM call.
 
-    우선순위: 빈 문자열 → 도배(단일문자 지배) → 이모지/부호 only → 짧음 → 정상.
+    Priority: empty string → spam (single-character dominance) → emoji/punctuation only → short → normal.
     """
     s = (text or "").strip()
     if not s:
@@ -64,21 +64,21 @@ def quality_weight(text: str) -> float:
     if len(compact) >= SPAM_MIN_LEN:
         most = max(Counter(compact).values())
         if most / len(compact) > SPAM_DOMINANCE:
-            return W_SPAM  # 도배 (예: "ㅋㅋㅋㅋㅋ", "aaaaaa")
+            return W_SPAM  # spam (e.g. "ㅋㅋㅋㅋㅋ", "aaaaaa")
     if not _WORD_RE.search(s):
-        return W_EMOJI_ONLY  # 이모지/문장부호 only (단어문자 0)
+        return W_EMOJI_ONLY  # emoji/punctuation only (0 word characters)
     if len(s) < SHORT_LEN:
-        return W_SHORT  # 너무 짧은 단답
+        return W_SHORT  # too-short one-liner
     return W_NORMAL
 
 
 def xp_award(text: str, base_xp: int = BASE_XP) -> int:
-    """이 메시지로 적립할 정수 XP. 항상 정수 도메인."""
+    """Integer XP to award for this message. Always in the integer domain."""
     return int(round(base_xp * quality_weight(text)))
 
 
 def caps_ratio(text: str) -> float:
-    """ASCII 알파벳 중 대문자 비율 [0,1]. 알파벳이 없으면 0.0(한글 등 비-casing 문자 보호)."""
+    """Uppercase ratio among ASCII letters [0,1]. 0.0 when there are no letters (protects non-casing characters such as Hangul)."""
     letters = [c for c in (text or "") if c.isascii() and c.isalpha()]
     if not letters:
         return 0.0
@@ -86,10 +86,11 @@ def caps_ratio(text: str) -> float:
 
 
 def penalty_weight(text: str, flood_count: int, mention_count: int, caps_ratio: float) -> int:
-    """신뢰-하락 페널티 XP (<= 0). 정상 메시지는 0. 의존성 0(LLM/DB 호출 없음).
+    """Trust-decay penalty XP (<= 0). 0 for a normal message. 0 dependencies (no LLM/DB calls).
 
-    도배(플러딩)·멘션 폭주·과도한 대문자에 음수 페널티를 합산한다. 한글 등 대소문자가
-    없는 텍스트는 caps_ratio 0.0 이라 CAPS 페널티에서 자연 제외된다.
+    Sums negative penalties for spam (flooding), mention bursts, and excessive uppercase. Text
+    without case such as Hangul has caps_ratio 0.0 and is thus naturally excluded from the CAPS
+    penalty.
     """
     penalty = 0
     if int(flood_count) > FLOOD_THRESHOLD:
@@ -103,22 +104,24 @@ def penalty_weight(text: str, flood_count: int, mention_count: int, caps_ratio: 
 
 
 def danger_score(text: str) -> int:
-    """위험(스캠/피싱) 콘텐츠 페널티 XP (<= 0). 보수적 마커 매칭만, 의존성 0(LLM/DB 없음).
+    """Dangerous (scam/phishing) content penalty XP (<= 0). Conservative marker matching only,
+    0 dependencies (no LLM/DB).
 
-    오탐을 줄이려 명백한 디스코드 스캠 문구만 본다. 길드 opt-in(기본 off)·shadow 권장.
+    Matches only obvious Discord scam phrases to reduce false positives. Guild opt-in (off by
+    default), shadow recommended.
     """
     low = (text or "").lower()
     return PENALTY_DANGER if any(m in low for m in DANGER_MARKERS) else 0
 
 
 def level_step(level: int) -> int:
-    """레벨 `level` → `level+1` 로 가는 데 필요한 XP (MEE6식 곡선)."""
+    """XP needed to go from level `level` to `level+1` (MEE6-style curve)."""
     n = max(0, int(level))
     return 5 * n * n + 50 * n + 100
 
 
 def cum_cost(level: int) -> int:
-    """레벨 `level` 에 '도달' 하기 위한 누적 총 XP. cum_cost(0) = 0."""
+    """Cumulative total XP needed to 'reach' level `level`. cum_cost(0) = 0."""
     lvl = max(0, int(level))
     total = 0
     for k in range(lvl):
@@ -127,7 +130,7 @@ def cum_cost(level: int) -> int:
 
 
 def level(total_xp: int) -> int:
-    """누적 XP 로 도달 가능한 최고 레벨 (0 XP = 레벨 0). 증분 누적 O(n)."""
+    """Highest level reachable with cumulative XP (0 XP = level 0). Incremental accumulation, O(n)."""
     xp = max(0, int(total_xp))
     n = 0
     acc = 0
@@ -140,7 +143,7 @@ def level(total_xp: int) -> int:
 
 
 def progress(total_xp: int) -> float:
-    """현재 레벨에서 다음 레벨까지 진행도 [0,1)."""
+    """Progress from the current level toward the next [0,1)."""
     xp = max(0, int(total_xp))
     lvl = level(xp)
     floor = cum_cost(lvl)
@@ -151,12 +154,12 @@ def progress(total_xp: int) -> float:
 
 
 def xp_to_next(total_xp: int) -> int:
-    """다음 레벨까지 남은 XP (정수)."""
+    """XP remaining to the next level (integer)."""
     xp = max(0, int(total_xp))
     lvl = level(xp)
     return cum_cost(lvl + 1) - xp
 
 
 def utc_day(epoch: float) -> str:
-    """고정 UTC-day 경계 키 'YYYY-MM-DD' (epoch 주어지면 순수함수)."""
+    """Fixed UTC-day boundary key 'YYYY-MM-DD' (a pure function given epoch)."""
     return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%d")

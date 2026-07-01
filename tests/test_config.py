@@ -29,7 +29,8 @@ def test_loads_with_required_fields():
     # onboarding optional → graceful defaults
     assert s.welcome_channel_id is None
     assert s.default_role_id is None
-    assert isinstance(s.welcome_message, str) and s.welcome_message
+    # Empty by default → onboarding falls back to the active locale's default greeting (§10).
+    assert isinstance(s.welcome_message, str)
 
 
 def test_admin_role_id_is_required():

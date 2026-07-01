@@ -1,8 +1,9 @@
-"""서버 블루프린트 템플릿 파서/검증 (ralplan 확장 — YAML/JSON → 셋업 계획).
+"""Server-blueprint template parser/validator (ralplan extension — YAML/JSON → setup plan).
 
-LLM·discord 무관 순수 모듈. ``yaml.safe_load`` 는 JSON을 YAML의 부분집합으로 처리하므로
-YAML과 JSON 템플릿을 모두 같은 경로로 파싱한다. 알 수 없는 권한 이름·채널 종류는 거부하고
-(closed set + value guard), 결과는 discord-free plain-data 데이터클래스로 돌려준다.
+LLM- and discord-agnostic pure module. Since ``yaml.safe_load`` treats JSON as a subset of YAML,
+both YAML and JSON templates are parsed through the same path. Unknown permission names and channel
+kinds are rejected (closed set + value guard), and the result is returned as discord-free plain-data
+dataclasses.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 
 import yaml
 
+from ..i18n import t
 from .guild_admin import (
     ADMINISTRATOR,
     BAN_MEMBERS,
@@ -23,23 +25,23 @@ from .guild_admin import (
     MODERATE_MEMBERS,
 )
 
-# 템플릿에 쓰는 권한 이름 → Discord 권한 비트 (닫힌 집합; 미지의 이름은 거부).
+# Permission names used in templates → Discord permission bits (closed set; unknown names rejected).
 PERMISSION_BITS: dict[str, int] = {
     "administrator": ADMINISTRATOR,
     "kick_members": KICK_MEMBERS,
     "ban_members": BAN_MEMBERS,
     "manage_channels": MANAGE_CHANNELS,
     "manage_guild": MANAGE_GUILD,
-    "manage_server": MANAGE_GUILD,  # 별칭
+    "manage_server": MANAGE_GUILD,  # alias
     "manage_messages": MANAGE_MESSAGES,
     "manage_nicknames": MANAGE_NICKNAMES,
     "manage_roles": MANAGE_ROLES,
     "manage_webhooks": MANAGE_WEBHOOKS,
     "moderate_members": MODERATE_MEMBERS,
-    "timeout_members": MODERATE_MEMBERS,  # 별칭
+    "timeout_members": MODERATE_MEMBERS,  # alias
 }
 
-# 역방향(서버 → 템플릿) 추출용: 권한 비트 → 정규 이름 (별칭 제외, 표시 순서 고정).
+# For reverse (server → template) extraction: permission bit → canonical name (aliases excluded, fixed display order).
 _CANONICAL_PERMS: tuple[tuple[str, int], ...] = (
     ("administrator", ADMINISTRATOR),
     ("manage_guild", MANAGE_GUILD),
@@ -52,7 +54,7 @@ _CANONICAL_PERMS: tuple[tuple[str, int], ...] = (
     ("ban_members", BAN_MEMBERS),
     ("moderate_members", MODERATE_MEMBERS),
 )
-# 템플릿이 표현할 수 있는 권한 비트 마스크 (그 외 비트는 추출 시 버림 — 스키마가 지원 안 함).
+# Bitmask of permissions the template can express (other bits are dropped on extraction — schema doesn't support them).
 SUPPORTED_PERM_MASK = (
     ADMINISTRATOR | MANAGE_GUILD | MANAGE_ROLES | MANAGE_CHANNELS | MANAGE_MESSAGES
     | MANAGE_WEBHOOKS | MANAGE_NICKNAMES | KICK_MEMBERS | BAN_MEMBERS | MODERATE_MEMBERS
@@ -60,7 +62,7 @@ SUPPORTED_PERM_MASK = (
 
 
 def bits_to_names(bits: int) -> list[str]:
-    """권한 비트필드 → 템플릿 권한 이름 목록 (지원하는 관리 권한만, 고정 순서)."""
+    """Permission bitfield → list of template permission names (supported management perms only, fixed order)."""
     return [name for name, bit in _CANONICAL_PERMS if bits & bit]
 
 CHANNEL_KINDS = ("text", "voice")
@@ -72,7 +74,7 @@ MAX_CHANNELS_PER_CATEGORY = 50
 
 
 class TemplateError(ValueError):
-    """템플릿이 구조적으로 잘못됐을 때 (사용자에게 그대로 보여줄 메시지)."""
+    """Raised when a template is structurally invalid (message shown to the user as-is)."""
 
 
 @dataclass(frozen=True)
@@ -102,35 +104,43 @@ class ServerTemplate:
     categories: tuple[TemplateCategory, ...]
 
     def summary(self, limit: int = 1800) -> str:
-        """적용 전 사람이 검토할 미리보기 텍스트 (Discord 2000자 제한 고려해 클램프)."""
-        lines = ["📋 템플릿 미리보기"]
+        """Preview text for a human to review before applying (clamped for Discord's 2000-char limit)."""
+        lines = [t("template.preview_title")]
         if self.roles:
             parts = []
             for r in self.roles:
                 tag = f"[{'+'.join(r.permission_names)}]" if r.permission_names else ""
                 parts.append(f"{r.name}{tag}")
-            lines.append("• 역할: " + ", ".join(parts))
+            lines.append(t("template.role_line", roles=", ".join(parts)))
         for c in self.categories:
             lock = " 🔒" if c.private else ""
             chs = ", ".join(
                 f"{ch.name}({'🔊' if ch.kind == 'voice' else '#'})" for ch in c.channels
             )
-            line = f"• 📁 {c.name}{lock}: {chs or '(채널 없음)'}"
+            chs_display = chs or t("template.no_channels")
+            line = t("template.category_line", name=c.name, lock=lock, chs=chs_display)
             if c.private and c.visible_to:
-                line += f"  (열람: {', '.join(c.visible_to)})"
+                line += t("template.visible_suffix", names=", ".join(c.visible_to))
             lines.append(line)
         total_ch = sum(len(c.channels) for c in self.categories)
-        lines.append(f"합계: 역할 {len(self.roles)} · 카테고리 {len(self.categories)} · 채널 {total_ch}")
+        lines.append(
+            t(
+                "template.totals",
+                roles=len(self.roles),
+                categories=len(self.categories),
+                channels=total_ch,
+            )
+        )
         text = "\n".join(lines)
-        return text if len(text) <= limit else text[:limit] + "…(생략)"
+        return text if len(text) <= limit else text[:limit] + t("template.truncated_suffix")
 
 
 def _req_str(value: object, ctx: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise TemplateError(f"{ctx}: 비어있지 않은 문자열이어야 해.")
+        raise TemplateError(t("template.err_req_str", ctx=ctx))
     s = value.strip()
     if len(s) > MAX_NAME_LEN:
-        raise TemplateError(f"{ctx}: 이름이 너무 길어 (최대 {MAX_NAME_LEN}자).")
+        raise TemplateError(t("template.err_name_too_long", ctx=ctx, max=MAX_NAME_LEN))
     return s
 
 
@@ -138,53 +148,53 @@ def _perm_bits(perms: object, ctx: str) -> tuple[int, tuple[str, ...]]:
     if perms is None:
         return 0, ()
     if not isinstance(perms, list):
-        raise TemplateError(f"{ctx}.permissions: 목록이어야 해.")
+        raise TemplateError(t("template.err_perms_list", ctx=ctx))
     bits = 0
     names: list[str] = []
     for p in perms:
         if not isinstance(p, str):
-            raise TemplateError(f"{ctx}.permissions: 권한 이름은 문자열이어야 해.")
+            raise TemplateError(t("template.err_perm_name_str", ctx=ctx))
         key = p.strip().lower()
         if key not in PERMISSION_BITS:
             allowed = ", ".join(sorted(set(PERMISSION_BITS)))
-            raise TemplateError(f"{ctx}: 알 수 없는 권한 '{p}'. 가능: {allowed}")
+            raise TemplateError(t("template.err_unknown_perm", ctx=ctx, p=p, allowed=allowed))
         bits |= PERMISSION_BITS[key]
         names.append(key)
     return bits, tuple(names)
 
 
 def parse_template(raw: str) -> ServerTemplate:
-    """YAML/JSON 텍스트 → 검증된 ServerTemplate. 잘못되면 TemplateError."""
+    """YAML/JSON text → a validated ServerTemplate. TemplateError if invalid."""
     if not isinstance(raw, str) or not raw.strip():
-        raise TemplateError("빈 템플릿이야. YAML 또는 JSON 내용을 넣어줘.")
+        raise TemplateError(t("template.err_empty_template"))
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        raise TemplateError(f"YAML/JSON 파싱 실패: {exc}") from exc
+        raise TemplateError(t("template.err_yaml_parse", exc=exc)) from exc
     if not isinstance(data, dict):
-        raise TemplateError("최상위는 매핑(객체)이어야 해. 예: roles:, categories:")
+        raise TemplateError(t("template.err_top_level_mapping"))
 
     roles_raw = data.get("roles") or []
     cats_raw = data.get("categories") or []
     if not isinstance(roles_raw, list):
-        raise TemplateError("roles는 목록이어야 해.")
+        raise TemplateError(t("template.err_roles_list"))
     if not isinstance(cats_raw, list):
-        raise TemplateError("categories는 목록이어야 해.")
+        raise TemplateError(t("template.err_categories_list"))
     if not roles_raw and not cats_raw:
-        raise TemplateError("roles 또는 categories 중 적어도 하나는 있어야 해.")
+        raise TemplateError(t("template.err_need_one"))
     if len(roles_raw) > MAX_ROLES:
-        raise TemplateError(f"역할이 너무 많아 (최대 {MAX_ROLES}).")
+        raise TemplateError(t("template.err_too_many_roles", max=MAX_ROLES))
     if len(cats_raw) > MAX_CATEGORIES:
-        raise TemplateError(f"카테고리가 너무 많아 (최대 {MAX_CATEGORIES}).")
+        raise TemplateError(t("template.err_too_many_categories", max=MAX_CATEGORIES))
 
     roles: list[TemplateRole] = []
     seen_roles: set[str] = set()
     for i, r in enumerate(roles_raw):
         if not isinstance(r, dict):
-            raise TemplateError(f"roles[{i}]: 매핑이어야 해.")
+            raise TemplateError(t("template.err_role_mapping", i=i))
         name = _req_str(r.get("name"), f"roles[{i}].name")
         if name in seen_roles:
-            raise TemplateError(f"중복 역할 이름: {name}")
+            raise TemplateError(t("template.err_dup_role", name=name))
         seen_roles.add(name)
         bits, names = _perm_bits(r.get("permissions"), f"roles[{i}]")
         roles.append(TemplateRole(name=name, permission_bits=bits, permission_names=names))
@@ -193,32 +203,32 @@ def parse_template(raw: str) -> ServerTemplate:
     seen_cats: set[str] = set()
     for i, c in enumerate(cats_raw):
         if not isinstance(c, dict):
-            raise TemplateError(f"categories[{i}]: 매핑이어야 해.")
+            raise TemplateError(t("template.err_category_mapping", i=i))
         cname = _req_str(c.get("name"), f"categories[{i}].name")
         if cname in seen_cats:
-            raise TemplateError(f"중복 카테고리 이름: {cname}")
+            raise TemplateError(t("template.err_dup_category", name=cname))
         seen_cats.add(cname)
         private = bool(c.get("private", False))
         visible_raw = c.get("visible_to") or []
         if not isinstance(visible_raw, list):
-            raise TemplateError(f"categories[{i}].visible_to: 목록이어야 해.")
+            raise TemplateError(t("template.err_visible_to_list", i=i))
         visible = tuple(_req_str(v, f"categories[{i}].visible_to[]") for v in visible_raw)
         chans_raw = c.get("channels") or []
         if not isinstance(chans_raw, list):
-            raise TemplateError(f"categories[{i}].channels: 목록이어야 해.")
+            raise TemplateError(t("template.err_channels_list", i=i))
         if len(chans_raw) > MAX_CHANNELS_PER_CATEGORY:
             raise TemplateError(
-                f"categories[{i}]: 채널이 너무 많아 (최대 {MAX_CHANNELS_PER_CATEGORY})."
+                t("template.err_too_many_channels", i=i, max=MAX_CHANNELS_PER_CATEGORY)
             )
         chans: list[TemplateChannel] = []
         for j, ch in enumerate(chans_raw):
             if not isinstance(ch, dict):
-                raise TemplateError(f"categories[{i}].channels[{j}]: 매핑이어야 해.")
+                raise TemplateError(t("template.err_channel_mapping", i=i, j=j))
             chname = _req_str(ch.get("name"), f"categories[{i}].channels[{j}].name")
             kind = ch.get("type") or "text"
             if not isinstance(kind, str) or kind.strip().lower() not in CHANNEL_KINDS:
                 raise TemplateError(
-                    f"categories[{i}].channels[{j}].type: 'text' 또는 'voice'여야 해 (받음: {kind!r})."
+                    t("template.err_channel_type", i=i, j=j, kind=kind)
                 )
             chans.append(TemplateChannel(name=chname, kind=kind.strip().lower()))
         cats.append(
@@ -231,7 +241,7 @@ def parse_template(raw: str) -> ServerTemplate:
 
 
 def to_yaml(template: ServerTemplate) -> str:
-    """ServerTemplate → YAML 문자열. parse_template로 다시 읽을 수 있는 형식(round-trip)."""
+    """ServerTemplate → YAML string. A format that parse_template can read back (round-trip)."""
     data: dict = {}
     if template.roles:
         roles_out = []

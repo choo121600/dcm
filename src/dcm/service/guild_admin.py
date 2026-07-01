@@ -18,6 +18,8 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from ..i18n import t
 from .cleanup import (
     ARCHIVE_CATEGORY_BASE,
     DEFAULT_INACTIVE_DAYS,
@@ -164,9 +166,9 @@ class GuildAdminService:
     def __init__(self, admin: GuildAdmin, pending: PendingConfirmations) -> None:
         self._admin = admin
         self._pending = pending
-        # confirm_token → 파싱된 ServerTemplate (드라이런에서 캐시 → confirm 시 실행). 단일 사용(pop).
+        # confirm_token → parsed ServerTemplate (cached during dry-run → executed on confirm). Single-use (pop).
         self._template_cache: dict = {}
-        # confirm_token → CleanupPlan (드라이런에서 캐시 → confirm 시 실행). 단일 사용(pop).
+        # confirm_token → CleanupPlan (cached during dry-run → executed on confirm). Single-use (pop).
         self._cleanup_cache: dict = {}
 
     def _gate(self, action: str, summary: str, *, role_permissions: int | None, confirm_token: str | None):
@@ -180,7 +182,7 @@ class GuildAdminService:
             token = self._pending.register(summary)
             return OpResult(
                 ok=False,
-                detail=f"확인 필요(고위험): {summary}",
+                detail=t("guild_admin.confirm_needed", summary=summary),
                 needs_confirmation=True,
                 confirmation_token=token,
                 risk=RISK_HIGH,
@@ -188,7 +190,7 @@ class GuildAdminService:
         if not self._pending.consume(confirm_token):
             return OpResult(
                 ok=False,
-                detail=f"확인 토큰이 유효하지 않거나 만료됨: {summary}",
+                detail=t("guild_admin.confirm_token_invalid", summary=summary),
                 needs_confirmation=True,
                 risk=RISK_HIGH,
             )
@@ -197,14 +199,14 @@ class GuildAdminService:
     async def create_category(self, *, guild_id, actor_name, actor_id, name) -> OpResult:
         reason = audit_reason(actor_name, actor_id, f"create category '{name}'")
         cid = await self._admin.create_category(guild_id, name, reason=reason)
-        return OpResult(True, f"카테고리 생성됨: {name} ({cid})")
+        return OpResult(True, t("guild_admin.category_created", name=name, cid=cid))
 
     async def create_channel(
         self, *, guild_id, actor_name, actor_id, name, kind, category_id=None
     ) -> OpResult:
         reason = audit_reason(actor_name, actor_id, f"create {kind} channel '{name}'")
         cid = await self._admin.create_channel(guild_id, name, kind, category_id, reason=reason)
-        return OpResult(True, f"{kind} 채널 생성됨: {name} ({cid})")
+        return OpResult(True, t("guild_admin.channel_created", kind=kind, name=name, cid=cid))
 
     async def edit_channel(
         self, *, guild_id, actor_name, actor_id, channel_id, name=None, category_id=None
@@ -213,26 +215,29 @@ class GuildAdminService:
         await self._admin.edit_channel(
             guild_id, channel_id, name=name, category_id=category_id, reason=reason
         )
-        return OpResult(True, f"채널 수정됨: {channel_id}")
+        return OpResult(True, t("guild_admin.channel_edited", channel_id=channel_id))
 
     async def delete_channel(
         self, *, guild_id, actor_name, actor_id, channel_id, confirm_token=None
     ) -> OpResult:
         gate = self._gate(
-            "delete_channel", f"채널 삭제 {channel_id}", role_permissions=None, confirm_token=confirm_token
+            "delete_channel",
+            t("guild_admin.summary_delete_channel", channel_id=channel_id),
+            role_permissions=None,
+            confirm_token=confirm_token,
         )
         if gate is not None:
             return gate
         reason = audit_reason(actor_name, actor_id, f"delete channel {channel_id}")
         await self._admin.delete_channel(guild_id, channel_id, reason=reason)
-        return OpResult(True, f"채널 삭제됨: {channel_id}", risk=RISK_HIGH)
+        return OpResult(True, t("guild_admin.channel_deleted", channel_id=channel_id), risk=RISK_HIGH)
 
     async def create_role(
         self, *, guild_id, actor_name, actor_id, name, permissions=0, confirm_token=None
     ) -> OpResult:
         gate = self._gate(
             "create_role",
-            f"역할 생성 '{name}' (관리권한 포함)",
+            t("guild_admin.summary_create_role", name=name),
             role_permissions=permissions,
             confirm_token=confirm_token,
         )
@@ -241,7 +246,7 @@ class GuildAdminService:
         reason = audit_reason(actor_name, actor_id, f"create role '{name}'")
         rid = await self._admin.create_role(guild_id, name, permissions=permissions, reason=reason)
         risk = classify_risk("create_role", role_permissions=permissions)
-        return OpResult(True, f"역할 생성됨: {name} ({rid})", risk=risk)
+        return OpResult(True, t("guild_admin.role_created", name=name, rid=rid), risk=risk)
 
     async def assign_role(
         self, *, guild_id, actor_name, actor_id, user_id, role_id, confirm_token=None
@@ -249,7 +254,7 @@ class GuildAdminService:
         perms = await self._admin.role_permissions(guild_id, role_id)
         gate = self._gate(
             "assign_role",
-            f"역할 부여 {role_id} → 멤버 {user_id} (관리권한 역할)",
+            t("guild_admin.summary_assign_role", role_id=role_id, user_id=user_id),
             role_permissions=perms,
             confirm_token=confirm_token,
         )
@@ -257,21 +262,21 @@ class GuildAdminService:
             return gate
         reason = audit_reason(actor_name, actor_id, f"assign role {role_id} to {user_id}")
         await self._admin.assign_role(guild_id, user_id, role_id, reason=reason)
-        return OpResult(True, f"역할 부여됨: {role_id} → {user_id}", risk=classify_risk("assign_role", role_permissions=perms))
+        return OpResult(True, t("guild_admin.role_assigned", role_id=role_id, user_id=user_id), risk=classify_risk("assign_role", role_permissions=perms))
 
     async def remove_role(
         self, *, guild_id, actor_name, actor_id, user_id, role_id
     ) -> OpResult:
         reason = audit_reason(actor_name, actor_id, f"remove role {role_id} from {user_id}")
         await self._admin.remove_role(guild_id, user_id, role_id, reason=reason)
-        return OpResult(True, f"역할 회수됨: {role_id} → {user_id}")
+        return OpResult(True, t("guild_admin.role_removed", role_id=role_id, user_id=user_id))
 
     async def set_role_permissions(
         self, *, guild_id, actor_name, actor_id, role_id, permissions, confirm_token=None
     ) -> OpResult:
         gate = self._gate(
             "set_role_permissions",
-            f"역할 권한 설정 {role_id} (관리권한 포함)",
+            t("guild_admin.summary_set_role_permissions", role_id=role_id),
             role_permissions=permissions,
             confirm_token=confirm_token,
         )
@@ -279,7 +284,7 @@ class GuildAdminService:
             return gate
         reason = audit_reason(actor_name, actor_id, f"set permissions on role {role_id}")
         await self._admin.set_role_permissions(guild_id, role_id, permissions, reason=reason)
-        return OpResult(True, f"역할 권한 설정됨: {role_id}", risk=classify_risk("set_role_permissions", role_permissions=permissions))
+        return OpResult(True, t("guild_admin.role_permissions_set", role_id=role_id), risk=classify_risk("set_role_permissions", role_permissions=permissions))
 
     async def create_project(
         self, *, guild_id, actor_name, actor_id, name, channels, access_role_name, confirm_token=None
@@ -289,9 +294,12 @@ class GuildAdminService:
         (bundled + creates a role). Partial failure reports what was created; no auto-rollback
         (Discord has no transactions) — ralplan S5."""
         if not channels:
-            return OpResult(False, "프로젝트 세트에는 채널이 최소 1개 필요해.", risk=RISK_HIGH)
+            return OpResult(False, t("guild_admin.project_needs_channel"), risk=RISK_HIGH)
         gate = self._gate(
-            "create_project", f"프로젝트 세트 '{name}' 생성", role_permissions=None, confirm_token=confirm_token
+            "create_project",
+            t("guild_admin.summary_create_project", name=name),
+            role_permissions=None,
+            confirm_token=confirm_token,
         )
         if gate is not None:
             return gate
@@ -315,94 +323,96 @@ class GuildAdminService:
                     guild_id, int(cid), int(role_id), view=True, reason=reason
                 )
         except Exception as exc:  # noqa: BLE001 - partial-failure report, no auto-rollback (S5)
+            created_str = ", ".join(created) or t("guild_admin.none_label")
             return OpResult(
                 False,
-                f"프로젝트 세트 '{name}' 부분 실패 — 생성됨: {', '.join(created) or '없음'}; 중단: {exc}. 자동 롤백 없음(생성분은 수동 정리 필요).",
+                t("guild_admin.project_partial_fail", name=name, created=created_str, exc=exc),
                 risk=RISK_HIGH,
             )
         return OpResult(
             True,
-            f"프로젝트 세트 '{name}' 생성 완료 — 접근역할 + 카테고리 + 채널 {len(channels)}개. {', '.join(created)}",
+            t("guild_admin.project_created", name=name, count=len(channels), created=", ".join(created)),
             risk=RISK_HIGH,
         )
     async def kick_member(
         self, *, guild_id, actor_name, actor_id, user_id, confirm_token=None
     ) -> OpResult:
-        """멤버 추방 (고위험, confirm 필요)."""
-        summary = f"멤버 추방: {user_id}"
+        """Kick a member (high-risk, requires confirmation)."""
+        summary = t("guild_admin.summary_kick", user_id=user_id)
         gate = self._gate("kick_member", summary, role_permissions=None, confirm_token=confirm_token)
         if gate is not None:
             return gate
         reason = audit_reason(actor_name, actor_id, f"kick member {user_id}")
         await self._admin.kick_member(guild_id, int(user_id), reason=reason)
-        return OpResult(True, f"멤버 추방됨: {user_id}", risk=RISK_HIGH)
+        return OpResult(True, t("guild_admin.member_kicked", user_id=user_id), risk=RISK_HIGH)
 
     async def ban_member(
         self, *, guild_id, actor_name, actor_id, user_id, confirm_token=None
     ) -> OpResult:
-        """멤버 차단(밴) (고위험, confirm 필요)."""
-        summary = f"멤버 차단(밴): {user_id}"
+        """Ban a member (high-risk, requires confirmation)."""
+        summary = t("guild_admin.summary_ban", user_id=user_id)
         gate = self._gate("ban_member", summary, role_permissions=None, confirm_token=confirm_token)
         if gate is not None:
             return gate
         reason = audit_reason(actor_name, actor_id, f"ban member {user_id}")
         await self._admin.ban_member(guild_id, int(user_id), reason=reason)
-        return OpResult(True, f"멤버 차단됨: {user_id}", risk=RISK_HIGH)
+        return OpResult(True, t("guild_admin.member_banned", user_id=user_id), risk=RISK_HIGH)
 
     async def timeout_member(
         self, *, guild_id, actor_name, actor_id, user_id, duration_seconds
     ) -> OpResult:
-        """멤버 타임아웃 (저위험, 즉시 실행)."""
+        """Time out a member (low-risk, executes immediately)."""
         reason = audit_reason(
             actor_name, actor_id, f"timeout member {user_id} for {duration_seconds}s"
         )
         await self._admin.timeout_member(guild_id, int(user_id), int(duration_seconds), reason=reason)
-        return OpResult(True, f"멤버 타임아웃 적용됨: {user_id} ({duration_seconds}초)", risk=RISK_LOW)
+        return OpResult(True, t("guild_admin.member_timed_out", user_id=user_id, duration=duration_seconds), risk=RISK_LOW)
 
     async def purge_messages(
         self, *, guild_id, actor_name, actor_id, channel_id, count, confirm_token=None
     ) -> OpResult:
-        """채널 메시지 대량 삭제 (count > 100 하드 거부; 고위험, confirm 필요)."""
+        """Bulk-delete channel messages (count > 100 is hard-rejected; high-risk, requires confirmation)."""
         count = int(count)
         if count > 100:
             return OpResult(
                 False,
-                f"메시지 삭제 상한 초과: Discord 벌크 삭제는 한 번에 최대 100건까지 가능해 (요청: {count}건).",
+                t("guild_admin.purge_over_limit", count=count),
                 needs_confirmation=False,
             )
-        summary = f"채널 메시지 삭제: {channel_id} ({count}건)"
+        summary = t("guild_admin.summary_purge", channel_id=channel_id, count=count)
         gate = self._gate("purge_messages", summary, role_permissions=None, confirm_token=confirm_token)
         if gate is not None:
             return gate
         reason = audit_reason(actor_name, actor_id, f"purge {count} messages in channel {channel_id}")
         deleted = await self._admin.purge_messages(guild_id, int(channel_id), count, reason=reason)
-        return OpResult(True, f"메시지 {deleted}건 삭제됨 (채널 {channel_id})", risk=RISK_HIGH)
+        return OpResult(True, t("guild_admin.messages_purged", deleted=deleted, channel_id=channel_id), risk=RISK_HIGH)
 
     async def apply_template(
         self, *, guild_id, actor_name, actor_id, template_text=None, confirm_token=None
     ) -> OpResult:
-        """서버 블루프린트 적용 (고위험, 항상 confirm). confirm_token이 없으면 파싱+검증 후
-        미리보기와 단일 토큰을 돌려주고 계획을 캐시한다(드라이런). confirm_token이 주어지면
-        캐시된 계획을 멱등 실행한다 — 같은 이름의 역할/카테고리/채널은 건너뛰고 재사용."""
-        from .template import TemplateError, parse_template  # lazy: import cycle 회피
+        """Apply a server blueprint (high-risk, always confirmed). Without a confirm_token, parse +
+        validate, then return a preview and a single token and cache the plan (dry-run). When a
+        confirm_token is given, execute the cached plan idempotently — roles/categories/channels
+        with the same name are skipped and reused."""
+        from .template import TemplateError, parse_template  # lazy: avoid import cycle
 
         if confirm_token is not None:
             plan = self._template_cache.pop(confirm_token, None)
             if plan is None:
                 return OpResult(
                     False,
-                    "템플릿 확인 토큰이 유효하지 않거나 만료됐어. 파일을 다시 올려줘.",
+                    t("guild_admin.template_token_invalid"),
                     needs_confirmation=True,
                     risk=RISK_HIGH,
                 )
             return await self._execute_template(guild_id, actor_name, actor_id, plan)
 
         if not template_text:
-            return OpResult(False, "템플릿 파일이 필요해 (.yaml/.yml/.json).", needs_confirmation=False)
+            return OpResult(False, t("guild_admin.template_file_needed"), needs_confirmation=False)
         try:
             plan = parse_template(template_text)
         except TemplateError as exc:
-            return OpResult(False, f"템플릿 오류: {exc}", needs_confirmation=False)
+            return OpResult(False, t("guild_admin.template_error", exc=exc), needs_confirmation=False)
         token = make_confirmation_token()
         self._template_cache[token] = plan
         return OpResult(
@@ -421,7 +431,7 @@ class GuildAdminService:
                 r["name"]: int(r["id"]) for r in await self._admin.list_roles(guild_id)
             }
             existing_channels = await self._admin.list_channels(guild_id)
-            role_ids = dict(existing_roles)  # name -> id (기존 + 신규)
+            role_ids = dict(existing_roles)  # name -> id (existing + newly created)
 
             for r in plan.roles:
                 if r.name in role_ids:
@@ -430,7 +440,7 @@ class GuildAdminService:
                     guild_id, r.name, permissions=r.permission_bits, reason=reason
                 )
                 role_ids[r.name] = int(rid)
-                created.append(f"역할 {r.name}")
+                created.append(t("guild_admin.created_role", name=r.name))
 
             cats_by_name = {
                 c["name"]: int(c["id"]) for c in existing_channels if c.get("type") == 4
@@ -442,9 +452,9 @@ class GuildAdminService:
                         await self._admin.create_category(guild_id, cat.name, reason=reason)
                     )
                     cats_by_name[cat.name] = cat_id
-                    created.append(f"카테고리 {cat.name}")
+                    created.append(t("guild_admin.created_category", name=cat.name))
                 if cat.private:
-                    # @everyone(역할 id == 길드 id) 열람 차단 → 지정 역할만 허용 (자식 채널 상속)
+                    # block @everyone (role id == guild id) from viewing → allow only the designated roles (children inherit)
                     await self._admin.set_channel_role_overwrite(
                         guild_id, cat_id, guild_id, view=False, reason=reason
                     )
@@ -466,21 +476,22 @@ class GuildAdminService:
                     await self._admin.create_channel(
                         guild_id, ch.name, ch.kind, cat_id, reason=reason
                     )
-                    created.append(f"{ch.kind} 채널 {ch.name}")
-        except Exception as exc:  # noqa: BLE001 - 부분 실패 보고, 자동 롤백 없음(트랜잭션 불가)
+                    created.append(t("guild_admin.created_channel", kind=ch.kind, name=ch.name))
+        except Exception as exc:  # noqa: BLE001 - report partial failure, no auto-rollback (no transactions)
+            created_str = ", ".join(created) or t("guild_admin.none_label")
             return OpResult(
                 False,
-                f"템플릿 적용 부분 실패 — 생성됨: {', '.join(created) or '없음'}; 중단: {exc}. 자동 롤백 없음.",
+                t("guild_admin.template_partial_fail", created=created_str, exc=exc),
                 risk=RISK_HIGH,
             )
         if not created:
-            return OpResult(True, "템플릿 적용 완료 — 변경 없음(모두 이미 존재).", risk=RISK_HIGH)
-        return OpResult(True, ("템플릿 적용 완료 ✅ — " + ", ".join(created))[:1900], risk=RISK_HIGH)
+            return OpResult(True, t("guild_admin.template_no_change"), risk=RISK_HIGH)
+        return OpResult(True, t("guild_admin.template_applied", created=", ".join(created))[:1900], risk=RISK_HIGH)
 
     async def cleanup_report(
         self, *, guild_id, inactive_days=DEFAULT_INACTIVE_DAYS, admin_role_id=0, welcome_channel_id=0, protected_role_ids=()
     ) -> OpResult:
-        """읽기 전용: 비활성 채널 + 고아 역할 후보를 계산해 요약만 반환(변경 없음)."""
+        """Read-only: compute inactive-channel + orphan-role candidates and return only a summary (no changes)."""
         channels = await self._admin.list_channels(guild_id)
         roles = await self._admin.list_roles(guild_id)
         plan = plan_cleanup(
@@ -506,7 +517,7 @@ class GuildAdminService:
         protected_role_ids=(),
         confirm_token=None,
     ) -> OpResult:
-        """비활성 채널을 '📦 아카이브' 카테고리로 이동(+멤버 숨김). 되돌릴 수 있음. 드라이런→토큰→실행."""
+        """Move inactive channels into the '📦 아카이브' category (+ hide from members). Reversible. Dry-run→token→execute."""
         channels = await self._admin.list_channels(guild_id)
         plan = plan_cleanup(
             channels,
@@ -521,13 +532,13 @@ class GuildAdminService:
             if self._cleanup_cache.pop(confirm_token, None) != "archive":
                 return OpResult(
                     False,
-                    "아카이브 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
+                    t("guild_admin.archive_token_invalid"),
                     needs_confirmation=True,
                     risk=RISK_HIGH,
                 )
             return await self._execute_archive(guild_id, actor_name, actor_id, channels, plan)
         if not plan.archive_channels:
-            return OpResult(True, "아카이브로 옮길 비활성 채널이 없어 ✅")
+            return OpResult(True, t("guild_admin.archive_none"))
         token = make_confirmation_token()
         self._cleanup_cache[token] = "archive"
         return OpResult(
@@ -550,7 +561,7 @@ class GuildAdminService:
         protected_role_ids=(),
         confirm_token=None,
     ) -> OpResult:
-        """'📦 아카이브' 안 모든 채널 삭제 + 고아 역할 삭제 (영구, 항상 confirm). 드라이런→토큰→실행."""
+        """Delete all channels inside '📦 아카이브' + delete orphan roles (permanent, always confirmed). Dry-run→token→execute."""
         channels = await self._admin.list_channels(guild_id)
         roles = await self._admin.list_roles(guild_id)
         plan = plan_cleanup(
@@ -566,13 +577,13 @@ class GuildAdminService:
             if self._cleanup_cache.pop(confirm_token, None) != "purge":
                 return OpResult(
                     False,
-                    "퍼지 확인 토큰이 유효하지 않거나 만료됐어. 다시 실행해줘.",
+                    t("guild_admin.purge_token_invalid"),
                     needs_confirmation=True,
                     risk=RISK_HIGH,
                 )
             return await self._execute_purge(guild_id, actor_name, actor_id, channels, plan)
         if not plan.purge_channels and not plan.delete_roles and not plan.orphan_categories:
-            return OpResult(True, "아카이브가 비어 있고 삭제할 고아 역할/카테고리도 없어 ✅")
+            return OpResult(True, t("guild_admin.purge_none"))
         token = make_confirmation_token()
         self._cleanup_cache[token] = "purge"
         return OpResult(
@@ -616,12 +627,12 @@ class GuildAdminService:
                 await self._admin.set_channel_role_overwrite(guild_id, ch.id, guild_id, view=False, reason=reason)
                 s[1] -= 1
                 moved.append(ch.name)
-            except Exception as exc:  # noqa: BLE001 - 부분 실패 보고, 자동 롤백 없음
-                failed.append(f"채널 {ch.name}: {exc}")
-        parts = [f"채널 {len(moved)}개 아카이브로 이동(숨김)"]
+            except Exception as exc:  # noqa: BLE001 - report partial failure, no auto-rollback
+                failed.append(t("guild_admin.fail_channel", name=ch.name, exc=exc))
+        parts = [t("guild_admin.archive_moved", count=len(moved))]
         if failed:
-            parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
-        return OpResult(True, ("아카이브 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
+            parts.append(t("guild_admin.fail_count", count=len(failed), details="; ".join(failed[:5])))
+        return OpResult(True, t("guild_admin.archive_done", parts=", ".join(parts))[:1900], risk=RISK_HIGH)
 
     async def _execute_purge(self, guild_id, actor_name, actor_id, channels, plan) -> OpResult:
         reason = audit_reason(actor_name, actor_id, "purge archive channels + orphan roles")
@@ -633,15 +644,15 @@ class GuildAdminService:
                 await self._admin.delete_channel(guild_id, ch.id, reason=reason)
                 deleted_ch.append(ch.name)
             except Exception as exc:  # noqa: BLE001
-                failed.append(f"채널 {ch.name}: {exc}")
+                failed.append(t("guild_admin.fail_channel", name=ch.name, exc=exc))
         for r in plan.delete_roles:
             try:
                 await self._admin.delete_role(guild_id, r.id, reason=reason)
                 deleted_role.append(r.name)
             except Exception as exc:  # noqa: BLE001
-                failed.append(f"역할 {r.name}: {exc}")
+                failed.append(t("guild_admin.fail_role", name=r.name, exc=exc))
         deleted_cat = 0
-        # 비워진 아카이브 카테고리 + 고아(빈) 카테고리 정리
+        # clean up emptied archive categories + orphan (empty) categories
         for cid in find_archive_category_ids(channels):
             try:
                 await self._admin.delete_channel(guild_id, cid, reason=reason)
@@ -653,15 +664,15 @@ class GuildAdminService:
                 await self._admin.delete_channel(guild_id, cat.id, reason=reason)
                 deleted_cat += 1
             except Exception as exc:  # noqa: BLE001
-                failed.append(f"카테고리 {cat.name}: {exc}")
+                failed.append(t("guild_admin.fail_category", name=cat.name, exc=exc))
         parts = [
-            f"채널 {len(deleted_ch)}개 삭제",
-            f"역할 {len(deleted_role)}개 삭제",
-            f"빈 카테고리 {deleted_cat}개 삭제",
+            t("guild_admin.purged_channels", count=len(deleted_ch)),
+            t("guild_admin.purged_roles", count=len(deleted_role)),
+            t("guild_admin.purged_categories", count=deleted_cat),
         ]
         if failed:
-            parts.append(f"실패 {len(failed)}건: " + "; ".join(failed[:5]))
-        return OpResult(True, ("퍼지 완료 ✅ — " + ", ".join(parts))[:1900], risk=RISK_HIGH)
+            parts.append(t("guild_admin.fail_count", count=len(failed), details="; ".join(failed[:5])))
+        return OpResult(True, t("guild_admin.purge_done", parts=", ".join(parts))[:1900], risk=RISK_HIGH)
 
 
 class RateLimiter:

@@ -1,14 +1,15 @@
-"""닫힌 동사셋 위 NL 라우터 (ralplan S3).
+"""NL router over a closed verb set (ralplan S3).
 
-LLM을 단일 tool_use 호출로 강제하여 자유형 생성 없이 verb+params를 추출한다.
-모든 특권 dispatch는 이 모듈 안 단일 chokepoint(route())를 통과한다.
-discord import 없음 — platform/base.AuthContext만 사용.
+Forces the LLM into a single tool_use call to extract verb+params without free-form generation.
+Every privileged dispatch passes through the single chokepoint (route()) in this module.
+No discord import — uses only platform/base.AuthContext.
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
+from ..i18n import t
 from ..platform.base import AuthContext, is_admin
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# GuildAdminService의 실제 verb 집합 + 폴백 센티넬.
+# The actual verb set of GuildAdminService + a fallback sentinel.
 VERBS: list[str] = [
     "create_category",
     "create_channel",
@@ -35,12 +36,12 @@ VERBS: list[str] = [
     "none",
 ]
 
-# anthropic tool 정의 — name은 반드시 'dispatch' (tool_choice로 강제).
+# anthropic tool definition — name must be 'dispatch' (forced via tool_choice).
 DISPATCH_TOOL: dict = {
     "name": "dispatch",
     "description": (
-        "사용자의 자연어 메시지를 파싱해 Discord 서버 관리 작업으로 매핑한다. "
-        "명확한 관리 의도가 없거나 불확실하면 verb를 'none'으로 설정한다."
+        "Parse the user's natural-language message and map it to a Discord server-management "
+        "action. If there is no clear management intent, or it is uncertain, set verb to 'none'."
     ),
     "input_schema": {
         "type": "object",
@@ -49,25 +50,25 @@ DISPATCH_TOOL: dict = {
                 "type": "string",
                 "enum": VERBS,
                 "description": (
-                    "실행할 관리 작업. 해당 없으면 'none'. "
-                    "가능한 값: create_category, create_channel, edit_channel, "
+                    "The management action to run, or 'none' if not applicable. "
+                    "Possible values: create_category, create_channel, edit_channel, "
                     "delete_channel, create_role, assign_role, remove_role, "
                     "set_role_permissions, create_project, kick, ban, timeout, purge, none."
                 ),
             },
             "params": {
                 "type": "object",
-                "description": "verb 실행에 필요한 매개변수. verb에 따라 필드가 다름.",
+                "description": "Parameters the verb needs; the fields vary by verb.",
             },
         },
         "required": ["verb"],
     },
 }
 
-# 파괴적 verb: NL 경로에서 서비스 호출 없이 확인 안내만 반환 (S3 단순 처리; S5에서 정교화 예정).
+# Destructive verbs: on the NL path, return only a confirmation notice without calling the service (simple S3 handling; to be refined in S5).
 _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({"delete_channel", "create_project"})
 
-# verb별 서비스 호출 전 필수 param 목록.
+# Required params per verb, checked before calling the service.
 _REQUIRED_PARAMS: dict[str, list[str]] = {
     "create_category": ["name"],
     "create_channel": ["name", "kind"],
@@ -82,29 +83,31 @@ _REQUIRED_PARAMS: dict[str, list[str]] = {
     "purge": ["channel_id", "count"],
 }
 
-# 모델이 값을 모를 때 넣는 placeholder/빈 값 — 누락으로 취급해 엉뚱한 이름 생성 방지.
+# Placeholder/empty values the model inserts when it doesn't know a value — treated as missing to avoid generating a bogus name.
 _PLACEHOLDER_VALUES: frozenset[str] = frozenset(
     {"", "<unknown>", "unknown", "none", "null", "n/a", "미정", "없음", "이름", "제목"}
 )
 
+# Parser instructions are in English: they steer the model, which parses user input in any
+# language (the closed verb set and placeholder guards below are language-agnostic).
 _DISPATCH_SYSTEM = (
-    "당신은 Discord 서버 관리 명령 파서입니다. "
-    "사용자의 메시지를 분석해 dispatch 도구 하나만 호출하세요. "
-    "지원 작업: create_category, create_channel, edit_channel, delete_channel, "
+    "You are a parser for Discord server-management commands. "
+    "Analyze the user's message and call the single dispatch tool. "
+    "Supported actions: create_category, create_channel, edit_channel, delete_channel, "
     "create_role, assign_role, remove_role, set_role_permissions, create_project, "
     "kick, ban, timeout, purge. "
-    "서버 관리 의도가 없으면 verb='none'을 반환하세요. "
-    "params에는 작업에 필요한 값만 넣고 없는 값은 추측하지 마세요. "
-    "사용자가 이름 등 필수 값을 명시하지 않았으면 그 필드를 아예 넣지 마세요(빈 문자열이나 "
-    "<UNKNOWN> 같은 placeholder 금지)."
+    "If there is no server-management intent, return verb='none'. "
+    "Put only the values the action needs into params, and never guess a value you weren't given. "
+    "If the user did not state a required value such as a name, omit that field entirely "
+    "(no empty strings or placeholders like <UNKNOWN>)."
 )
 
 
 class NLRouter:
-    """닫힌 동사셋 위 얕은 NL 라우터 — 단일 특권 dispatch chokepoint.
+    """Shallow NL router over a closed verb set — the single privileged dispatch chokepoint.
 
-    route()가 not None을 반환하면 오케스트레이터는 그 결과를 최종 응답으로 사용하고,
-    None을 반환하면 페르소나 chat 경로로 폴백한다.
+    If route() returns not None, the orchestrator uses that result as the final response;
+    if it returns None, it falls back to the persona chat path.
     """
 
     def __init__(
@@ -115,13 +118,13 @@ class NLRouter:
     ) -> None:
         self._llm = llm
         self._service = service
-        # 분류(dispatch)는 값싼 모델로 — 매 멘션마다 도는 경로라 비용 큼. None이면 기본 모델.
+        # Classification (dispatch) uses the cheap model — this path runs on every mention, so it's costly. None means the default model.
         self._dispatch_model = dispatch_model
 
     async def route(self, auth: AuthContext, user_text: str) -> str | None:
-        """NL 텍스트를 파싱해 관리 명령 실행 결과를 반환하거나, 폴백 시 None 반환.
+        """Parse the NL text and return the admin-command execution result, or None to fall back.
 
-        모든 특권 verb는 이 메서드 내 단일 is_admin 검사를 통과해야 한다.
+        Every privileged verb must pass the single is_admin check in this method.
         """
         extracted = await self._llm.extract_dispatch(
             _DISPATCH_SYSTEM,
@@ -136,24 +139,21 @@ class NLRouter:
         if verb == "none" or verb not in VERBS:
             return None
 
-        # 멀티길드: 관리 명령은 컨텍스트 길드로만 동작 — 길드 없으면(이론상 DM) 거부(fail-closed).
+        # Multi-guild: admin commands act only on the context guild — reject (fail-closed) when there's no guild (a DM, in theory).
         if not auth.guild_id:
-            return "⛔ 서버 안에서만 관리 명령을 쓸 수 있어."
+            return t("router.guild_only")
 
-        # ── 단일 특권 dispatch chokepoint ──────────────────────────────────
+        # ── single privileged dispatch chokepoint ──────────────────────────
         if not is_admin(auth.role_ids, auth.admin_role_id, auth.is_owner, auth.has_manage_guild):
-            return "⛔ 이 명령은 관리자만 사용할 수 있어."
+            return t("router.admin_only")
 
         params: dict = extracted.get("params") or {}
 
-        # 파괴적 작업: 서비스 호출 없이 확인 안내 반환 (NL 경로 직접 실행 불가).
+        # Destructive action: return a confirmation notice without calling the service (no direct execution on the NL path).
         if verb in _DESTRUCTIVE_VERBS:
-            return (
-                f"⚠️ '{verb}' 작업은 파괴적이라 NL 경로에서 직접 실행할 수 없어. "
-                "슬래시 커맨드로 확인 토큰을 발급받아 진행해줘."
-            )
+            return t("router.destructive_blocked", verb=verb)
 
-        # 필수 param 검증 — 부족하면 추측 없이 확인 요청.
+        # Validate required params — if any are missing, ask for confirmation instead of guessing.
         required = _REQUIRED_PARAMS.get(verb, [])
         missing = [
             k
@@ -163,12 +163,12 @@ class NLRouter:
             or (isinstance(params[k], str) and params[k].strip().lower() in _PLACEHOLDER_VALUES)
         ]
         if missing:
-            return f"❓ '{verb}' 실행에 필요한 정보가 부족해: {', '.join(missing)}. 다시 알려줘."
+            return t("router.missing_params", verb=verb, missing=", ".join(missing))
 
         return await self._dispatch(verb, auth, params)
 
     async def _dispatch(self, verb: str, auth: AuthContext, params: dict) -> str:
-        """verb를 GuildAdminService 메서드로 매핑해 호출하고 결과를 한국어로 반환."""
+        """Map the verb to a GuildAdminService method, call it, and return the result in Korean."""
         common = dict(
             guild_id=auth.guild_id,
             actor_name=auth.author_name,
@@ -232,18 +232,15 @@ class NLRouter:
                     count=int(params["count"]),
                 )
             else:
-                log.warning("NLRouter: 알 수 없는 verb=%s", verb)
-                return f"❓ 알 수 없는 작업: {verb}"
+                log.warning("NLRouter: unknown verb=%s", verb)
+                return t("router.unknown_verb", verb=verb)
         except Exception:
-            log.exception("NLRouter dispatch 오류 (verb=%s)", verb)
-            return "⚠️ 명령 실행 중 오류가 발생했어."
+            log.exception("NLRouter dispatch error (verb=%s)", verb)
+            return t("router.dispatch_error")
 
-        # 서비스 결과 변환
+        # Convert the service result.
         if result.needs_confirmation:
-            return (
-                f"⚠️ '{verb}' 작업은 확인이 필요해 (고위험). "
-                "슬래시 커맨드로 확인 토큰을 발급받아 진행해줘."
-            )
+            return t("router.needs_confirmation", verb=verb)
         if result.ok:
-            return f"✅ {result.detail}"
-        return f"❌ {result.detail}"
+            return t("router.ok", detail=result.detail)
+        return t("router.fail", detail=result.detail)

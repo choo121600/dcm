@@ -1,0 +1,4 @@
+onboarding:
+  # Default join-welcome text used when the operator hasn't set WELCOME_MESSAGE.
+  # `{name}` is replaced with the new member's display name.
+  welcome_default: "환영합니다! 편하게 인사하고 대화해요 :)"

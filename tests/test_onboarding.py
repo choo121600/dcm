@@ -23,9 +23,8 @@ import types
 
 import pytest
 
-from dcm.service.onboarding import OnboardingDecision, OnboardingPolicy
 from dcm.platform.pycord_adapter import PycordAdapter
-
+from dcm.service.onboarding import OnboardingDecision, OnboardingPolicy
 
 # ---------------------------------------------------------------------------
 # 공통 fixture

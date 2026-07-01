@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 
 class BackgroundJobs:
-    """Periodic memory maintenance: pruning (forget) and reflection (grow) (DESIGN.md §7).
+    """Periodic memory maintenance: pruning (forget) and reflection (grow) (ARCHITECTURE.md §7).
 
     Dependency-free asyncio loops rather than apscheduler. Each loop sleeps first, so a fresh
     process doesn't immediately churn an empty store.
@@ -80,13 +80,13 @@ class BackgroundJobs:
                 log.exception("%s job crashed; continuing", name)
 
     async def _prune_daily_usage(self) -> None:
-        # 신뢰 게이팅(G003): 현재 UTC-day 미만의 daily_usage 행을 일일 정리(stale 위생).
+        # Trust gating (G003): daily cleanup of daily_usage rows older than the current UTC-day (stale hygiene).
         from .leveling.scoring import utc_day
 
         self._leveling_store.prune_daily_usage(utc_day(time.time()))
 
     async def _prune(self) -> None:
-        # 멀티길드(P5): 길드별 핸들로만 가지치기 — 교차길드 미접근.
+        # Multi-guild (P5): prune only via per-guild handles — no cross-guild access.
         for gid in self._store.guild_ids():
             await run_pruning(
                 self._store.for_guild(gid),
@@ -101,7 +101,7 @@ class BackgroundJobs:
             )
 
     async def _reflect(self) -> None:
-        # 멀티길드(P5): 길드별 핸들로만 reflection — 통합 semantic 의 source_ids 가 단일 길드로 한정.
+        # Multi-guild (P5): reflection only via per-guild handles — the consolidated semantic's source_ids are confined to a single guild.
         for gid in self._store.guild_ids():
             await run_reflection(
                 self._llm,

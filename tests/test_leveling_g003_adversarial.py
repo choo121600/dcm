@@ -33,7 +33,6 @@ from dcm.orchestrator import Orchestrator
 from dcm.platform.base import IncomingMessage
 from dcm.scheduler import BackgroundJobs
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------

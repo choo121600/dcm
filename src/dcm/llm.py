@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Credential:
-    """One LLM credential. The key value is never logged — only `label` (DESIGN.md §9.1)."""
+    """One LLM credential. The key value is never logged — only `label` (ARCHITECTURE.md §9.1)."""
 
     api_key: str
     label: str
@@ -24,7 +24,7 @@ def parse_credentials(raw: str) -> list[Credential]:
 
 
 class LLMClient:
-    """Anthropic calls behind a credential list + selection strategy (DESIGN.md §9.1).
+    """Anthropic calls behind a credential list + selection strategy (ARCHITECTURE.md §9.1).
 
     M1 uses a single key, so `complete()` simply tries credentials in order. Round-robin /
     least-used strategies can slot in here later without touching callers.
@@ -49,9 +49,9 @@ class LLMClient:
         max_tokens: int | None = None,
         web_search: bool = False,
     ) -> tuple[str, bool]:
-        """텍스트 완성 요청. web_search=True면 Anthropic 내장 web_search 도구 첨부.
+        """Request a text completion. When web_search=True, attach Anthropic's built-in web_search tool.
 
-        반환: (text, web_used) — 키는 절대 로그에 남기지 않음 (DESIGN.md §14.1).
+        Returns: (text, web_used) — the key is never written to logs (ARCHITECTURE.md §14.1).
         """
         last_error: Exception | None = None
         for cred in self._creds:  # M1: single pass; pool: failover order
@@ -70,14 +70,14 @@ class LLMClient:
                             tools=[{"type": "web_search_20250305", "name": "web_search"}],
                         )
                         text = "".join(b.text for b in resp.content if b.type == "text")
-                        # 실제로 web_search 블록이 응답에 있어야만 web_used=True
+                        # web_used=True only if the response actually contains a web_search block
                         web_used = any(
                             getattr(b, "type", "") in {"server_tool_use", "web_search_tool_result"}
                             for b in resp.content
                         )
                         return text, web_used
                     except anthropic.BadRequestError:
-                        # 내장 web_search 불가(계정/모델 미지원) — 텍스트 전용으로 graceful degrade
+                        # built-in web_search unavailable (account/model unsupported) — gracefully degrade to text-only
                         log.warning(
                             "web_search tool unavailable on %s; degrading to text-only",
                             cred.label,
@@ -88,7 +88,7 @@ class LLMClient:
                     resp = await client.messages.create(**base_kwargs)
                     return "".join(b.text for b in resp.content if b.type == "text"), False
             except anthropic.APIError as exc:
-                # Log the label and error type only — never the key (DESIGN.md §14.1).
+                # Log the label and error type only — never the key (ARCHITECTURE.md §14.1).
                 log.warning(
                     "LLM call failed on %s: %s; trying next credential",
                     cred.label,
@@ -110,7 +110,7 @@ class LLMClient:
 
         Uses tool_choice={'type':'tool','name':'dispatch'} to guarantee the model
         always calls the named tool. Credential failover follows the same pattern as
-        complete() — label logged, key never logged (DESIGN.md §14.1).
+        complete() — label logged, key never logged (ARCHITECTURE.md §14.1).
         """
         last_error: Exception | None = None
         for cred in self._creds:

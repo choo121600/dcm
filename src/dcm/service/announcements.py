@@ -1,10 +1,14 @@
-"""예약 공지 저장소 + cron 스케줄 로직 (discord-free, 순수 모듈).
+"""Scheduled-announcement store + cron scheduling logic (discord-free, pure module).
 
-관리봇 용도: 특정 일정(주간 회의·이벤트 리마인더 등)을 지정 채널에 주기적으로/1회성으로 공지.
-- 반복: 5필드 cron 표현식(분 시 일 월 요일), **KST(Asia/Seoul)** 기준. 새 의존성 없이 자체 매처.
-- 1회성: run_at(epoch, UTC)에 한 번.
-어댑터(platform)가 매분 틱마다 due_now() 로 발화 대상을 골라 채널에 게시하고 mark_fired 한다.
-cron 문법: `*`, `N`, `*/N`, `A-B`, 콤마 목록. 요일 0/7=일요일. 표준 vixie-cron 축약만(L/W/# 미지원).
+For the admin bot: post a given schedule (weekly meetings, event reminders, etc.) to a designated
+channel, either recurring or one-shot.
+- Recurring: 5-field cron expression (minute hour day month weekday), based on **KST (Asia/Seoul)**.
+  A self-contained matcher with no new dependencies.
+- One-shot: once at run_at (epoch, UTC).
+The adapter (platform) picks the due targets via due_now() on each minute tick, posts to the channel,
+and calls mark_fired.
+cron syntax: `*`, `N`, `*/N`, `A-B`, comma lists. Weekday 0/7=Sunday. Standard vixie-cron
+abbreviations only (L/W/# unsupported).
 """
 from __future__ import annotations
 
@@ -14,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ..i18n import t
+
 KST = ZoneInfo("Asia/Seoul")
 
 _SCHEMA = """
@@ -22,10 +28,10 @@ CREATE TABLE IF NOT EXISTS scheduled_announcements (
   guild_id          TEXT NOT NULL,
   channel_id        TEXT NOT NULL,
   message           TEXT NOT NULL,
-  cron              TEXT,            -- 반복: 5필드 cron (KST). NULL 이면 1회성.
-  run_at            REAL,            -- 1회성: epoch(UTC). NULL 이면 반복.
+  cron              TEXT,            -- recurring: 5-field cron (KST). NULL means one-shot.
+  run_at            REAL,            -- one-shot: epoch (UTC). NULL means recurring.
   enabled           INTEGER NOT NULL DEFAULT 1,
-  last_fired_minute TEXT,            -- 중복 발화 방지용 KST 'YYYY-MM-DD HH:MM'
+  last_fired_minute TEXT,            -- KST 'YYYY-MM-DD HH:MM' to prevent duplicate firing
   created_by        TEXT,
   created_at        REAL NOT NULL
 );
@@ -38,11 +44,11 @@ CREATE TABLE IF NOT EXISTS scheduled_events (
   guild_id    TEXT NOT NULL,
   channel_id  TEXT NOT NULL,
   title       TEXT NOT NULL,
-  event_at    REAL NOT NULL,             -- 행사 시각 epoch(UTC, KST 로 입력)
-  lead_days   TEXT NOT NULL,             -- 카운트다운 오프셋 CSV, 예 '30,14,7,3,1,0'
-  fired_leads TEXT NOT NULL DEFAULT '',  -- 이미 발화한 오프셋 CSV
-  message     TEXT,                      -- 선택 추가 문구
-  mention     TEXT,                      -- 선택 멘션(@everyone / <@&role>)
+  event_at    REAL NOT NULL,             -- event time epoch (UTC; entered as KST)
+  lead_days   TEXT NOT NULL,             -- countdown offsets CSV, e.g. '30,14,7,3,1,0'
+  fired_leads TEXT NOT NULL DEFAULT '',  -- offsets already fired, CSV
+  message     TEXT,                      -- optional extra text
+  mention     TEXT,                      -- optional mention (@everyone / <@&role>)
   enabled     INTEGER NOT NULL DEFAULT 1,
   created_by  TEXT,
   created_at  REAL NOT NULL
@@ -50,10 +56,10 @@ CREATE TABLE IF NOT EXISTS scheduled_events (
 CREATE INDEX IF NOT EXISTS idx_evt_guild ON scheduled_events(guild_id);
 """
 
-# 행사 카운트다운 기본 리드데이(일): 한 달·2주·1주·3일·1일 전 + 당일.
+# Default lead days for event countdowns: one month/2 weeks/1 week/3 days/1 day before + the day itself.
 EVENT_DEFAULT_LEADS: tuple[int, ...] = (30, 14, 7, 3, 1, 0)
 
-_FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))  # 분 시 일 월 요일
+_FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))  # minute hour day month weekday
 
 
 @dataclass(frozen=True)
@@ -71,21 +77,21 @@ class Announcement:
 
 
 class CronError(ValueError):
-    """잘못된 cron 표현식."""
+    """Invalid cron expression."""
 
 
 def _parse_field(field: str, lo: int, hi: int) -> set[int]:
-    """cron 한 필드를 허용값 집합으로. `*`, `N`, `*/N`, `A-B`, `A-B/N`, 콤마 목록 지원."""
+    """Parse one cron field into a set of allowed values. Supports `*`, `N`, `*/N`, `A-B`, `A-B/N`, comma lists."""
     out: set[int] = set()
     for part in field.split(","):
         part = part.strip()
         if not part:
-            raise CronError(f"빈 필드 항목: {field!r}")
+            raise CronError(t("announcements.err_empty_field", field=field))
         step = 1
         if "/" in part:
             base, _, step_s = part.partition("/")
             if not step_s.isdigit() or int(step_s) < 1:
-                raise CronError(f"잘못된 step: {part!r}")
+                raise CronError(t("announcements.err_bad_step", part=part))
             step = int(step_s)
         else:
             base = part
@@ -94,29 +100,29 @@ def _parse_field(field: str, lo: int, hi: int) -> set[int]:
         elif "-" in base:
             a, _, b = base.partition("-")
             if not (a.isdigit() and b.isdigit()):
-                raise CronError(f"잘못된 범위: {part!r}")
+                raise CronError(t("announcements.err_bad_range", part=part))
             start, end = int(a), int(b)
         elif base.isdigit():
             start = end = int(base)
         else:
-            raise CronError(f"잘못된 값: {part!r}")
+            raise CronError(t("announcements.err_bad_value", part=part))
         if start < lo or end > hi or start > end:
-            raise CronError(f"범위 벗어남: {part!r} (허용 {lo}-{hi})")
+            raise CronError(t("announcements.err_out_of_range", part=part, lo=lo, hi=hi))
         out.update(range(start, end + 1, step))
     return out
 
 
 def parse_cron(expr: str) -> list[set[int]]:
-    """5필드 cron 을 필드별 허용값 집합 리스트로 파싱(검증 겸용). 실패 시 CronError."""
+    """Parse a 5-field cron into a list of per-field allowed-value sets (also validates). CronError on failure."""
     fields = (expr or "").split()
     if len(fields) != 5:
-        raise CronError("cron 은 5필드여야 함: '분 시 일 월 요일' (예: '0 9 * * 1')")
+        raise CronError(t("announcements.err_cron_fields"))
     return [_parse_field(f, lo, hi) for f, (lo, hi) in zip(fields, _FIELD_BOUNDS)]
 
 
 def cron_matches(expr: str, dt: datetime) -> bool:
-    """dt(해당 타임존의 시각)가 cron 에 매칭되는지. 일/요일은 vixie-cron 세만틱스(둘 중 하나라도
-    제약이면 OR; 둘 다 * 면 항상 매칭)."""
+    """Whether dt (a time in the relevant timezone) matches the cron. Day/weekday follow vixie-cron
+    semantics (OR if either is restricted; always match if both are *)."""
     minute, hour, dom, month, dow = parse_cron(expr)
     py_dow = (dt.weekday() + 1) % 7  # Mon=0(py) → cron Sun=0
     if dt.minute not in minute or dt.hour not in hour or dt.month not in month:
@@ -131,27 +137,27 @@ def cron_matches(expr: str, dt: datetime) -> bool:
 
 
 def minute_key(now_utc: float) -> str:
-    """발화 중복 방지용 KST 분 단위 키."""
+    """KST minute-granularity key for preventing duplicate firings."""
     return datetime.fromtimestamp(now_utc, KST).strftime("%Y-%m-%d %H:%M")
 
 
 def is_due(ann: Announcement, now_utc: float) -> bool:
-    """이 공지가 지금 발화해야 하는지(순수 판정)."""
+    """Whether this announcement should fire now (pure decision)."""
     if not ann.enabled:
         return False
     key = minute_key(now_utc)
     if ann.cron:
-        if ann.last_fired_minute == key:  # 이번 분에 이미 발화
+        if ann.last_fired_minute == key:  # already fired this minute
             return False
         return cron_matches(ann.cron, datetime.fromtimestamp(now_utc, KST))
-    if ann.run_at is not None:  # 1회성
+    if ann.run_at is not None:  # one-shot
         return ann.last_fired_minute is None and now_utc >= ann.run_at
     return False
 
 
 @dataclass(frozen=True)
 class Event:
-    """행사 일정 1건. event_at 시점 기준으로 lead_days(일)만큼 앞서 카운트다운 공지."""
+    """A single event schedule. Countdown announcements are posted lead_days (days) ahead of event_at."""
 
     id: int
     guild_id: str
@@ -168,7 +174,7 @@ class Event:
 
 
 def due_event_leads(evt: Event, now_utc: float) -> list[int]:
-    """지금 발화해야 할 리드 오프셋 목록(아직 안 쏜 것 중 트리거 도달, 행사 직후 1시간까지)."""
+    """List of lead offsets that should fire now (not-yet-fired ones whose trigger has arrived, up to 1 hour after the event)."""
     if not evt.enabled:
         return []
     out: list[int] = []
@@ -182,13 +188,18 @@ def due_event_leads(evt: Event, now_utc: float) -> list[int]:
 
 
 def render_event_message(evt: Event, days: int) -> str:
-    """행사 카운트다운 공지 문구(discord-free). days=표시할 남은 일수(0 이하면 D-DAY)."""
+    """Event countdown announcement text (discord-free). days = remaining days to display (D-DAY if ≤ 0)."""
     when = datetime.fromtimestamp(evt.event_at, KST)
-    dow = "월화수목금토일"[when.weekday()]
-    tag = "🔔 **D-DAY**" if days <= 0 else f"🔔 **D-{days}**"
+    dow = t("announcements.weekday_letters")[when.weekday()]
+    tag = t("announcements.dday_label") if days <= 0 else t("announcements.dcount_label", days=days)
     lines = [
-        f"{tag} · 📅 **{evt.title}**",
-        f"🗓️ {when.strftime('%Y-%m-%d')} ({dow}) {when.strftime('%H:%M')} (KST)",
+        t("announcements.title_line", tag=tag, title=evt.title),
+        t(
+            "announcements.date_label",
+            date=when.strftime("%Y-%m-%d"),
+            dow=dow,
+            time=when.strftime("%H:%M"),
+        ),
     ]
     if evt.message:
         lines.append(evt.message)
@@ -199,7 +210,7 @@ def render_event_message(evt: Event, days: int) -> str:
 
 
 class AnnouncementStore:
-    """예약 공지 SQLite 저장소 (memory.db 동일 파일 재사용 가능). discord-free."""
+    """Scheduled-announcement SQLite store (can reuse the same memory.db file). discord-free."""
 
     def __init__(self, db_path: str) -> None:
         path = Path(db_path)
@@ -228,9 +239,9 @@ class AnnouncementStore:
         import time as _t
 
         if not cron and run_at is None:
-            raise ValueError("cron 또는 run_at 중 하나는 필요")
+            raise ValueError(t("announcements.err_cron_or_runat"))
         if cron:
-            parse_cron(cron)  # 검증
+            parse_cron(cron)  # validate
         cur = self._db.execute(
             "INSERT INTO scheduled_announcements "
             "(guild_id, channel_id, message, cron, run_at, enabled, created_by, created_at) "
@@ -279,7 +290,7 @@ class AnnouncementStore:
 
 
 class EventStore:
-    """행사 일정(카운트다운 공지) SQLite 저장소. memory.db 동일 파일 재사용. discord-free."""
+    """Event-schedule (countdown announcement) SQLite store. Reuses the same memory.db file. discord-free."""
 
     def __init__(self, db_path: str) -> None:
         path = Path(db_path)
@@ -323,27 +334,28 @@ class EventStore:
         created_by=None,
         now=None,
     ) -> int:
-        import time as _t
         import math
+        import time as _t
 
         now_ts = now if now is not None else _t.time()
         leads = tuple(sorted({int(x) for x in lead_days}, reverse=True))
         if any(d < 0 for d in leads):
-            raise ValueError("lead_days 는 음수 불가")
-        # 등록 시점 처리(핵심):
-        #  - 이미 (1시간 유예까지) 끝난 행사면 전부 스킵, 아무것도 발화 안 함.
-        #  - "늦게 등록"(첫 마일스톤이 이미 지남)이면 지금 남은 일수(D-cur)를 즉시 1회 공지하고,
-        #    그보다 오래된 마일스톤은 스킵 → 이후 남은 마일스톤만 순서대로.
-        #  - 아직 첫 마일스톤 전이면 즉시 공지 없이 예정된 마일스톤대로.
+            raise ValueError(t("announcements.err_lead_negative"))
+        # Registration-time handling (key):
+        #  - If the event is already over (including the 1-hour grace), skip everything and fire nothing.
+        #  - On "late registration" (the first milestone has already passed), announce the current
+        #    remaining days (D-cur) once immediately, skip older milestones → then only the remaining
+        #    milestones in order.
+        #  - If still before the first milestone, no immediate announcement — follow the scheduled milestones.
         effective = leads
         if event_at + 3600 < now_ts:
             prefired = sorted(leads, reverse=True)
         elif leads and now_ts >= event_at - max(leads) * 86400:
             remaining = max(0.0, (event_at - now_ts) / 86400.0)
-            cur_days = round(remaining)  # 라벨용 남은 일수
-            fire_lead = math.ceil(remaining)  # 트리거를 now 이하로 → 즉시 발화 보장
+            cur_days = round(remaining)  # remaining days for the label
+            fire_lead = math.ceil(remaining)  # trigger ≤ now → guarantees immediate firing
             effective = tuple(sorted(set(leads) | {fire_lead}, reverse=True))
-            # cur 이상(현재·과거) 마일스톤은 스킵하되 즉시발화용 fire_lead 만 남김
+            # skip milestones ≥ cur (current/past) but keep fire_lead for immediate firing
             prefired = sorted((d for d in effective if d >= cur_days and d != fire_lead), reverse=True)
         else:
             prefired = []

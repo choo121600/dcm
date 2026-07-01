@@ -1,0 +1,8 @@
+# Korean locale — the complete reference catalog (the bot's original language).
+# This is the fallback for any key missing from another locale. Keys are dotted
+# namespaces resolved via dcm.i18n.t("namespace.key", **params). See ARCHITECTURE.md §10.
+
+_meta:
+  locale: ko
+  name: 한국어
+  language: Korean
