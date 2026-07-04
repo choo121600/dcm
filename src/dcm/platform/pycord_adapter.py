@@ -805,7 +805,13 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                     return None
                 return await func(ctx, *args, **kw)
 
-            wrapped.__signature__ = inspect.signature(func)  # preserve options for pycord
+            # Resolve PEP 563 stringized annotations (`from __future__ import annotations`) to real
+            # types so pycord's slash-option typing works on Python 3.14. Without this the option
+            # `_raw_type` stays a str/tuple and invocation raises "issubclass() arg 1 must be a class".
+            try:
+                wrapped.__signature__ = inspect.signature(func, eval_str=True)
+            except Exception:  # noqa: BLE001 - keep raw annotations if a string can't be evaluated
+                wrapped.__signature__ = inspect.signature(func)
             wrapped.__gjc_admin_guarded__ = True  # asserted by the by-construction test
             self._client.slash_command(
                 name=name, description=description, **kwargs

@@ -220,3 +220,16 @@ def test_study_kickoff_requires_guild(loop):
     loop.run_until_complete(_cmd(a).callback(ctx, post=True))
     text, _ = ctx.responses[-1]
     assert "서버" in text  # guild_only message
+
+
+def test_admin_command_option_annotations_resolved():
+    """Regression: `from __future__ import annotations` + Python 3.14 left the slash-option
+    `_raw_type` as a stringized tuple (e.g. `('bool',)`), so pycord option parsing raised
+    `issubclass() arg 1 must be a class` on invocation. The admin_command wrapper must resolve
+    annotations to real types."""
+    a = _adapter()
+    cmd = _cmd(a)  # study-kickoff exposes a `post: bool` option
+    opts = {o.name: o for o in cmd.options}
+    assert "post" in opts, f"options: {list(opts)}"
+    rt = opts["post"]._raw_type
+    assert not isinstance(rt, (str, tuple)), f"'post' annotation unresolved: {rt!r}"
