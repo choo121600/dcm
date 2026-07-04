@@ -1,0 +1,8 @@
+study:
+  # /study-kickoff — 각 스터디 카테고리의 채팅 채널에 올라가는 스터디별 시작 안내 메시지.
+  kickoff_intro: "📢 내일부터 공식적으로 교류활동이 시작됩니다!"
+  kickoff_confirmed: "🗓️ **{name}** 일정: {schedule}"
+  kickoff_unconfirmed: "🗓️ **{name}** 일정이 아직 확정되지 않았어요. 멘토님과 함께 일정을 조율해주세요!"
+  kickoff_note: "↳ 참고: {note}"
+  kickoff_mentor: "🧑‍🏫 멘토: {mentor}"
+  kickoff_screenshot: "📸 멘토님, 스터디를 진행하시면서 진행 상황을 스크린샷으로 찍어 이 채널에 올려주세요!"

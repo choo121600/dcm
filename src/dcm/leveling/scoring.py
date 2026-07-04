@@ -48,8 +48,13 @@ DANGER_MARKERS = (
     "공짜 니트로",
 )
 
+# --- promotion-verification bonus (code defaults; per-guild overridable via settings) ---
+PROMO_BONUS_XP = 100  # bonus XP for a verified promotion post (vs BASE_XP=15 for a normal message)
+PROMO_DAILY_CAP = 1  # max verified promo bonuses per member per UTC day (anti-farming)
+
 _WORD_RE = re.compile(r"[^\W_]", re.UNICODE)  # one or more alphanumeric/Unicode word characters
 _WS_RE = re.compile(r"\s+")
+_URL_RE = re.compile(r"(https?://|www\.|discord\.gg/|discord\.com/invite/)", re.IGNORECASE)  # promo 'proof' link/invite marker
 
 
 def quality_weight(text: str) -> float:
@@ -75,6 +80,11 @@ def quality_weight(text: str) -> float:
 def xp_award(text: str, base_xp: int = BASE_XP) -> int:
     """Integer XP to award for this message. Always in the integer domain."""
     return int(round(base_xp * quality_weight(text)))
+
+
+def contains_url(text: str) -> bool:
+    """True if the text carries a link/invite marker — a lightweight promo 'proof' signal (0 dependencies)."""
+    return bool(text) and _URL_RE.search(text) is not None
 
 
 def caps_ratio(text: str) -> float:

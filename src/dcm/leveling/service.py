@@ -14,11 +14,14 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
+from enum import Enum
 
 import discord
 
 from ..i18n import t
 from .scoring import (
+    PROMO_BONUS_XP,
+    PROMO_DAILY_CAP,
     caps_ratio,
     danger_score,
     level,
@@ -98,6 +101,15 @@ def _all_permission_names() -> set[str]:
     if isinstance(valid, dict):
         names |= set(valid.keys())
     return names
+
+
+class PromoResult(str, Enum):
+    """Outcome of a promotion-verification bonus attempt (the adapter maps it to a reaction)."""
+
+    SKIP = "skip"  # not the promo channel, leveling disabled, or bonus disabled
+    NO_PROOF = "no_proof"  # in the promo channel but no screenshot/link proof
+    CAPPED = "capped"  # already hit the per-day promo cap
+    AWARDED = "awarded"  # bonus XP granted
 
 
 class LevelingService:
@@ -362,6 +374,83 @@ class LevelingService:
         except Exception:  # noqa: BLE001
             log.exception("leveling apply_signal_penalty failed (silent)")
             return False
+
+    # --- promotion verification bonus (post proof in the promo channel → daily-capped bonus XP) ---
+
+    @staticmethod
+    def _promo_channel_id(settings) -> int | None:
+        v = getattr(settings, "promo_channel_id", None) if settings is not None else None
+        try:
+            return int(v) if v else None  # 0/None/unparseable → feature off
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _promo_bonus_xp(settings) -> int:
+        v = getattr(settings, "promo_bonus_xp", None) if settings is not None else None
+        try:
+            n = int(v) if v else PROMO_BONUS_XP
+        except (TypeError, ValueError):
+            return PROMO_BONUS_XP
+        return n if n > 0 else PROMO_BONUS_XP
+
+    @staticmethod
+    def _promo_daily_cap(settings) -> int:
+        v = getattr(settings, "promo_daily_cap", None) if settings is not None else None
+        try:
+            n = int(v) if v else PROMO_DAILY_CAP
+        except (TypeError, ValueError):
+            return PROMO_DAILY_CAP
+        return n if n > 0 else PROMO_DAILY_CAP
+
+    def maybe_award_promo(
+        self,
+        guild_id: int | str,
+        user_id: int | str,
+        channel_id: int | str,
+        *,
+        has_proof: bool,
+        now: float | None = None,
+    ) -> PromoResult:
+        """Award a (configurable, default once-per-UTC-day) bonus for a verified promotion post.
+
+        Fires only in the guild's configured promo channel and only when the post carries proof
+        (a screenshot attachment or a link — the adapter computes `has_proof`). Daily-capped per
+        member to prevent farming; each award is audited. Exceptions degrade silently.
+        """
+        try:
+            mono = time.monotonic()
+            settings = self._cached_settings(guild_id, mono)
+            if not self._enabled(settings):
+                return PromoResult.SKIP
+            promo_ch = self._promo_channel_id(settings)
+            if promo_ch is None or str(channel_id) != str(promo_ch):
+                return PromoResult.SKIP  # feature off, or message not in the promo channel
+            if not has_proof:
+                return PromoResult.NO_PROOF
+            bonus = self._promo_bonus_xp(settings)
+            if bonus <= 0:
+                return PromoResult.SKIP
+            wall = now if now is not None else time.time()
+            day = utc_day(wall)
+            cap = self._promo_daily_cap(settings)
+            used = self._store.get_daily_usage(guild_id, user_id, day, "promo")
+            if used >= cap:
+                return PromoResult.CAPPED
+            self._store.add_xp(guild_id, user_id, bonus, now=wall)
+            self._store.incr_daily_usage(guild_id, user_id, day, "promo")
+            log.info(
+                "leveling promo bonus: guild=%s user=%s +%s xp (%s/%s today)",
+                guild_id,
+                user_id,
+                bonus,
+                used + 1,
+                cap,
+            )
+            return PromoResult.AWARDED
+        except Exception:  # noqa: BLE001
+            log.exception("leveling maybe_award_promo failed (silent degrade)")
+            return PromoResult.SKIP
 
     # --- trust gating (G003/G004): per-level daily limits ---
 

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `locales/<locale>/*.yaml` (ko/en), selectable via the `BOT_LOCALE` setting (default `ko`).
 - Open-source project scaffolding: `LICENSE` (MIT), `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, GitHub issue/PR templates, and a CI workflow (ruff + pytest).
+- Promotion-verification bonus for activity leveling: admins designate a promo channel with
+  `/set-promo`; posting proof (a screenshot attachment or a link) there grants daily-capped
+  bonus XP. Per-guild settings `promo_channel_id` / `promo_bonus_xp` / `promo_daily_cap`.
+- Study kickoff announcement `/study-kickoff`: posts a per-study start notice to each study
+  category's chat channel (matched via `study_lookup`), announcing the confirmed schedule (or
+  asking to coordinate with the mentor when unconfirmed) and requesting progress screenshots.
+  Curated schedules live in `service/study_schedule.py`; defaults to a no-ping preview.
 
 ### Changed
 - Code comments and docstrings translated to English throughout `src/`.

@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS guild_settings (
   leveling_decay_shadow     INTEGER,
   leveling_danger_enabled   INTEGER,
   leveling_injection_enabled INTEGER,
+  promo_channel_id          INTEGER,
+  promo_bonus_xp            INTEGER,
+  promo_daily_cap           INTEGER,
   updated_at                REAL
 );
 """
@@ -43,6 +46,9 @@ _SETTABLE = frozenset(
         "leveling_decay_shadow",
         "leveling_danger_enabled",
         "leveling_injection_enabled",
+        "promo_channel_id",
+        "promo_bonus_xp",
+        "promo_daily_cap",
     }
 )
 
@@ -61,6 +67,9 @@ class GuildSettings:
     leveling_decay_shadow: bool | None = None  # None = enforce by default (actually deducts when decay is enabled)
     leveling_danger_enabled: bool | None = None  # None = OFF by default (danger wordlist disabled)
     leveling_injection_enabled: bool | None = None  # None = OFF by default (injection signal disabled)
+    promo_channel_id: int | None = None  # None/0 = promo-verification bonus disabled
+    promo_bonus_xp: int | None = None  # None = service default (100 XP)
+    promo_daily_cap: int | None = None  # None = service default (1 award per UTC day)
 
 
 class GuildSettingsStore:
@@ -88,6 +97,9 @@ class GuildSettingsStore:
             ("leveling_decay_shadow", "INTEGER"),
             ("leveling_danger_enabled", "INTEGER"),
             ("leveling_injection_enabled", "INTEGER"),
+            ("promo_channel_id", "INTEGER"),
+            ("promo_bonus_xp", "INTEGER"),
+            ("promo_daily_cap", "INTEGER"),
         ):
             if col not in cols:
                 self._db.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {ddl}")
@@ -140,6 +152,9 @@ class GuildSettingsStore:
                 if row["leveling_injection_enabled"] is None
                 else bool(row["leveling_injection_enabled"])
             ),
+            promo_channel_id=row["promo_channel_id"],
+            promo_bonus_xp=row["promo_bonus_xp"],
+            promo_daily_cap=row["promo_daily_cap"],
         )
 
     def _upsert(self, guild_id: int | str, field: str, value) -> None:
@@ -185,6 +200,15 @@ class GuildSettingsStore:
 
     def set_leveling_injection_enabled(self, guild_id: int | str, enabled: bool) -> None:
         self._upsert(guild_id, "leveling_injection_enabled", 1 if enabled else 0)
+
+    def set_promo_channel(self, guild_id: int | str, channel_id: int) -> None:
+        self._upsert(guild_id, "promo_channel_id", int(channel_id))
+
+    def set_promo_bonus_xp(self, guild_id: int | str, bonus_xp: int) -> None:
+        self._upsert(guild_id, "promo_bonus_xp", int(bonus_xp))
+
+    def set_promo_daily_cap(self, guild_id: int | str, daily_cap: int) -> None:
+        self._upsert(guild_id, "promo_daily_cap", int(daily_cap))
 
     def close(self) -> None:
         self._db.close()

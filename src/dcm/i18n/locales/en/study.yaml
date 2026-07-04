@@ -1,0 +1,8 @@
+study:
+  # /study-kickoff — per-study kickoff message posted to each study category's chat channel.
+  kickoff_intro: "📢 Official study activities start tomorrow!"
+  kickoff_confirmed: "🗓️ **{name}** schedule: {schedule}"
+  kickoff_unconfirmed: "🗓️ **{name}**'s schedule isn't fixed yet. Please coordinate it with your mentor!"
+  kickoff_note: "↳ Note: {note}"
+  kickoff_mentor: "🧑‍🏫 Mentor: {mentor}"
+  kickoff_screenshot: "📸 Mentors, please screenshot your study's progress and post it in this channel as you go!"

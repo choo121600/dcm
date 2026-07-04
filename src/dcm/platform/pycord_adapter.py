@@ -7,6 +7,8 @@ import time
 import discord
 
 from ..i18n import t
+from ..leveling.scoring import PROMO_BONUS_XP, PROMO_DAILY_CAP, contains_url
+from ..leveling.service import PromoResult
 from ..service import guild_admin as policy
 from .base import (
     BufferedMessage,
@@ -268,6 +270,28 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             if awarded:
                 # Only on an award (cooldown passed), attempt the unattended level→role grant (idempotent, allow-list guarded, G004).
                 asyncio.create_task(self._safe_reconcile(message.author))
+        # Promotion-verification bonus: extra XP for posting proof (screenshot/link) in the configured promo channel (daily-capped).
+        if self._leveling is not None:
+            try:
+                has_proof = bool(getattr(message, "attachments", None)) or contains_url(
+                    message.content or ""
+                )
+                promo = self._leveling.maybe_award_promo(
+                    message.guild.id,
+                    message.author.id,
+                    message.channel.id,
+                    has_proof=has_proof,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("leveling promo hook failed (silent degrade)")
+                promo = PromoResult.SKIP
+            if promo is PromoResult.AWARDED:
+                asyncio.create_task(self._react(message, "✅"))
+                asyncio.create_task(self._safe_reconcile(message.author))  # bonus may cross a level threshold
+            elif promo is PromoResult.NO_PROOF:
+                asyncio.create_task(self._react(message, "❓"))
+            elif promo is PromoResult.CAPPED:
+                asyncio.create_task(self._react(message, "🔁"))
         # Address detection: @mention / reply to a bot message / name call in the message ("썩스가재야 …", "안녕 썩스가재야").
         # Name calls allow natural addressing while curbing spam (ARCHITECTURE.md §14.4; persona.md examples).
         if not self._is_addressed(message):
@@ -427,6 +451,49 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
     async def _send_to(self, channel, text: str) -> None:
         for chunk in split_for_discord(text):
             await channel.send(chunk)
+
+    async def _post_announcement(self, channel, text: str) -> None:
+        """Send an announcement allowed to ping @here/@everyone/roles (degrades silently)."""
+        try:
+            await channel.send(
+                text,
+                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("announcement send failed (silent degrade)")
+
+    @staticmethod
+    def _pick_chat_channel(category):
+        """The category's chat text channel: prefer a chat-named one, else the first text channel."""
+        text_channels = [
+            c
+            for c in getattr(category, "channels", []) or []
+            if getattr(c, "type", None) == discord.ChannelType.text
+        ]
+        if not text_channels:
+            return None
+        chat_terms = ("채팅", "잡담", "일반", "수다", "chat", "talk", "general")
+        for c in text_channels:
+            low = (getattr(c, "name", "") or "").lower()
+            if any(term in low for term in chat_terms):
+                return c
+        return text_channels[0]
+
+    def _resolve_study_channels(self, guild):
+        """Map each curated study → (StudySchedule, chat channel|None) by matching category names."""
+        from ..service.study_lookup import match_study
+        from ..service.study_schedule import STUDY_SCHEDULES
+
+        categories = list(getattr(guild, "categories", []) or [])
+        resolved = []
+        for filename, study in STUDY_SCHEDULES.items():
+            channel = None
+            for cat in categories:
+                if match_study(getattr(cat, "name", "") or "") == filename:
+                    channel = self._pick_chat_channel(cat)
+                    break
+            resolved.append((study, channel))
+        return resolved
 
     async def _deliver_reply(self, message, reply) -> None:
         """Send the reply, but if the anti-monopoly nudge fires, handle it per the configured style (anti-fatigue).
@@ -848,6 +915,13 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
         except Exception:  # noqa: BLE001
             log.exception("leveling reconcile task failed")
 
+    async def _react(self, message, emoji: str) -> None:
+        """Best-effort emoji acknowledgement (needs Add Reactions permission; degrades silently)."""
+        try:
+            await message.add_reaction(emoji)
+        except Exception:  # noqa: BLE001
+            log.debug("add_reaction failed (silent degrade)", exc_info=True)
+
     def register_admin_commands(self, service) -> None:
         """Wire the guild-management slash-command surface (ralplan S2+). Every command is
         registered through admin_command so InvokerCheck is enforced by construction."""
@@ -1123,6 +1197,36 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
             self._settings.set_default_role(gid, rid)
             await ctx.respond(t("adapter.default_role_set", rid=rid), ephemeral=True)
 
+        @self.admin_command(name="set-promo", description=t("adapter.cmd_set_promo_desc"))
+        async def set_promo(ctx, channel_id: str, bonus_xp: int = 0, daily_cap: int = 0):
+            if self._settings is None:
+                await ctx.respond(t("adapter.no_settings_store"), ephemeral=True)
+                return
+            try:
+                cid = int(channel_id)
+            except ValueError:
+                await ctx.respond(t("adapter.channel_id_not_int"), ephemeral=True)
+                return
+            gid = self._ctx_guild(ctx)
+            self._settings.set_promo_channel(gid, cid)
+            if bonus_xp > 0:
+                self._settings.set_promo_bonus_xp(gid, bonus_xp)
+            if daily_cap > 0:
+                self._settings.set_promo_daily_cap(gid, daily_cap)
+            if cid <= 0:
+                await ctx.respond(t("adapter.promo_disabled"), ephemeral=True)
+                return
+            s = self._settings.get(gid)
+            await ctx.respond(
+                t(
+                    "adapter.promo_channel_set",
+                    cid=cid,
+                    bonus=(getattr(s, "promo_bonus_xp", None) or PROMO_BONUS_XP),
+                    cap=(getattr(s, "promo_daily_cap", None) or PROMO_DAILY_CAP),
+                ),
+                ephemeral=True,
+            )
+
         @self.admin_command(name="show-config", description=t("adapter.cmd_show_config_desc"))
         async def show_config(ctx):
             if self._settings is None:
@@ -1136,7 +1240,55 @@ class PycordAdapter(ChatPlatform, GuildAdmin):
                 t("adapter.config_welcome_channel", value=s.welcome_channel_id or not_set),
                 t("adapter.config_default_role", value=s.default_role_id or not_set),
                 t("adapter.config_welcome_message", value=s.welcome_message or not_set),
+                t("adapter.config_promo_channel", value=getattr(s, "promo_channel_id", None) or not_set),
+                t("adapter.config_promo_bonus", value=getattr(s, "promo_bonus_xp", None) or PROMO_BONUS_XP),
+                t("adapter.config_promo_cap", value=getattr(s, "promo_daily_cap", None) or PROMO_DAILY_CAP),
             ]
+            await ctx.respond("\n".join(lines), ephemeral=True)
+
+        @self.admin_command(
+            name="study-kickoff", description=t("adapter.cmd_study_kickoff_desc")
+        )
+        async def study_kickoff(ctx, post: bool = False):
+            from ..service.study_schedule import build_study_message
+
+            guild = getattr(ctx, "guild", None)
+            if guild is None:
+                await ctx.respond(t("adapter.guild_only"), ephemeral=True)
+                return
+            resolved = self._resolve_study_channels(guild)
+            if post:
+                count = 0
+                for study, channel in resolved:
+                    if channel is None:
+                        continue
+                    try:
+                        await self._post_announcement(channel, build_study_message(study))
+                        count += 1
+                    except Exception:  # noqa: BLE001
+                        log.exception("study-kickoff send failed for %s", study.name)
+                key = "adapter.study_kickoff_posted" if count else "adapter.study_kickoff_none_matched"
+                await ctx.respond(t(key, count=count), ephemeral=True)
+                return
+            # preview: no send, no ping — lets the admin verify channel mapping first
+            lines = [t("adapter.study_kickoff_preview_head")]
+            sample = None
+            for study, channel in resolved:
+                ch = f"<#{getattr(channel, 'id', '?')}>" if channel is not None else t(
+                    "adapter.study_kickoff_ch_fail"
+                )
+                status = (
+                    t("adapter.study_kickoff_status_confirmed", schedule=study.schedule)
+                    if study.confirmed
+                    else t("adapter.study_kickoff_status_unconfirmed")
+                )
+                lines.append(
+                    t("adapter.study_kickoff_line", name=study.name, channel=ch, status=status)
+                )
+                if sample is None and channel is not None:
+                    sample = build_study_message(study)
+            if sample is not None:
+                lines.append(t("adapter.study_kickoff_sample_head", sample=sample))
             await ctx.respond("\n".join(lines), ephemeral=True)
 
         @self.admin_command(

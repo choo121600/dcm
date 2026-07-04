@@ -169,7 +169,8 @@ Milestones:
 
 Server-management track (**ralplan S1–S7**): admin registration, role-based authz, channel/role/
 category ops, moderation, template apply, onboarding, and the live-guild smoke step. Activity
-**leveling** (G001–G004): XP scoring, decay, quotas, and anti-abuse gating.
+**leveling** (G001–G004): XP scoring, decay, quotas, anti-abuse gating, and an opt-in
+promotion-verification bonus (post proof in a configured channel → daily-capped bonus XP).
 
 ## 12. Reliability & graceful degradation
 
