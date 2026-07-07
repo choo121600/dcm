@@ -6,3 +6,8 @@ study:
   kickoff_note: "↳ 참고: {note}"
   kickoff_mentor: "🧑‍🏫 멘토: {mentor}"
   kickoff_screenshot: "📸 멘토님, 스터디를 진행하시면서 진행 상황을 스크린샷으로 찍어 이 채널에 올려주세요!"
+
+  # Compact schedule table injected into the chat prompt for schedule/overlap questions.
+  schedule_line: "- {name} — 멘토 {mentor} · {schedule}"
+  schedule_tbd: "일정 미확정 (멘토와 조율 중)"
+  schedule_note: " · 참고: {note}"

@@ -14,6 +14,7 @@ from .llm import LLMClient
 from .memory.ingest import IngestionPipeline
 from .memory.store import MemoryStore
 from .platform.base import AuthContext, BufferedMessage, IncomingMessage
+from .service.study_schedule import schedule_block, wants_schedule
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +257,12 @@ class Orchestrator:
                 detail = None
             if detail:
                 study_block = f"{t('orchestrator.study_detail_label')}\n{detail}\n\n"
+
+        # Cross-study schedule questions (a specific date/time/day or overlap, naming no study):
+        # inject the curated schedule table (static, tiny) so the bot answers from data instead
+        # of deflecting to "ask your mentor".
+        if wants_schedule(text):
+            study_block += f"{t('orchestrator.study_schedule_label')}\n{schedule_block()}\n\n"
 
         user_content = (
             f"{memory_block}"

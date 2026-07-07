@@ -6,3 +6,8 @@ study:
   kickoff_note: "↳ Note: {note}"
   kickoff_mentor: "🧑‍🏫 Mentor: {mentor}"
   kickoff_screenshot: "📸 Mentors, please screenshot your study's progress and post it in this channel as you go!"
+
+  # Compact schedule table injected into the chat prompt for schedule/overlap questions.
+  schedule_line: "- {name} — mentor {mentor} · {schedule}"
+  schedule_tbd: "schedule TBD (being coordinated with the mentor)"
+  schedule_note: " · note: {note}"

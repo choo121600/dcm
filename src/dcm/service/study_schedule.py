@@ -11,6 +11,7 @@ category can be mapped to a study by running `match_study` on the category name.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..i18n import t
@@ -26,6 +27,43 @@ class StudySchedule:
     @property
     def confirmed(self) -> bool:
         return self.schedule is not None
+
+
+# Schedule/overlap question cues — any hit injects the compact schedule table into the prompt.
+# Broader than study_lookup's per-study keywords: cross-study questions ("does anything run
+# Sunday 14:00?", "do any studies overlap?") name no specific study, so they need their own gate.
+_SCHEDULE_CUES = (
+    "일정", "스케줄", "시간표", "몇 시", "몇시", "언제", "요일",
+    "겹치", "겹쳐", "겹침", "동시에", "같은 시간",
+    "월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일",
+    "schedule", "overlap",
+)
+# Explicit date/time mentions: "14시", "14:00", "7/19", "7월 19일", "7월".
+_TIME_RE = re.compile(r"\d{1,2}\s*(?:시|:\d{2})|\d{1,2}\s*/\s*\d{1,2}|\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?")
+
+
+def wants_schedule(text: str) -> bool:
+    """True when the message looks like a schedule/overlap question (day/time/date/overlap cue)."""
+    low = (text or "").lower()
+    return any(c in low for c in _SCHEDULE_CUES) or bool(_TIME_RE.search(low))
+
+
+def schedule_block() -> str:
+    """Compact all-studies schedule table (one line per study) for prompt injection.
+
+    Static bundled data — no I/O. Injected by the orchestrator only when `wants_schedule`
+    fires, so ordinary chit-chat pays no token cost.
+    """
+    lines = []
+    for study in STUDY_SCHEDULES.values():
+        if study.confirmed:
+            sched = study.schedule
+        else:
+            sched = t("study.schedule_tbd")
+            if study.note:
+                sched += t("study.schedule_note", note=study.note)
+        lines.append(t("study.schedule_line", name=study.name, mentor=study.mentor, schedule=sched))
+    return "\n".join(lines)
 
 
 # filename (match_study return) -> schedule. Order follows the study_lookup lineup.

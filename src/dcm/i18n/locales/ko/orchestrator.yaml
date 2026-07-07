@@ -7,6 +7,7 @@ orchestrator:
   no_memories: "음 너에 대해 딱히 기억하는 건 아직 없어 ㅋㅋ"
   show_memories: "내가 너에 대해 기억하는 거 이런 것들 ㅋㅋ\n{lines}"
   study_detail_label: "[study detail — 이 문서를 근거로 커리큘럼을 설명해줘]"
+  study_schedule_label: "[study schedules — 각 스터디의 확정 일정. 시간·요일·날짜·겹침 질문은 이 표를 근거로 정확하게 답해줘. 표에 없는 일정은 지어내지 말고 모른다고 해]"
 
   # System-prompt scaffolding (instructions to the model). The persona voice itself
   # is loaded from persona.md; these lines steer language, knowledge use, and capability.

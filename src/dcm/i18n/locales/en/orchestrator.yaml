@@ -6,6 +6,7 @@ orchestrator:
   no_memories: "Hmm, I don't really remember anything about you yet lol"
   show_memories: "Here's the stuff I remember about you lol\n{lines}"
   study_detail_label: "[study detail — explain the curriculum based on this document]"
+  study_schedule_label: "[study schedules — the confirmed schedule of every study. Answer time/day/date/overlap questions precisely from this table. Never invent a schedule that is not listed here]"
 
   reply_directive: "Always reply in English, in the casual, friendly register described above. Keep replies short and natural."
   knowledge_usage: "If someone asks about this community, the currently open studies, or the mentors, explain it kindly based on the [server knowledge] section. For anything not covered there, honestly say you don't know — don't make it up."
