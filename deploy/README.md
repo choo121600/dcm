@@ -160,6 +160,12 @@ cd deploy/local-proxy
 PROXY_HOST=$(tailscale ip -4) python3 claude_code_proxy.py   # binds your tailnet IP:8787
 ```
 
+**Keep it running (auto-start at login, restart on crash):** install the LaunchAgent template
+[`com.dcm.ccproxy.plist.example`](./local-proxy/com.dcm.ccproxy.plist.example) — its header comment
+has the one-line `sed` + `launchctl load -w`. It binds the Tailscale IP (tailnet-only) and KeepAlive
+respawns it. Without it, the plain command above dies on laptop sleep/reboot (the bot then just
+falls back to the API key).
+
 - **Partial coverage by design:** plain conversation is served by your subscription; `tools` and
   forced `tool_choice` return 400 so the bot fails over — web_search degrades to text here and the
   NL router's tool call uses the API key. Any claude error/timeout → 5xx → API-key fallback.

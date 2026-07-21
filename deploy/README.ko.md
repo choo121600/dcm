@@ -160,6 +160,11 @@ cd deploy/local-proxy
 PROXY_HOST=$(tailscale ip -4) python3 claude_code_proxy.py   # tailnet IP:8787에 바인딩
 ```
 
+**상시 기동 (로그인 시 자동 시작, 크래시 시 재기동):** LaunchAgent 템플릿
+[`com.dcm.ccproxy.plist.example`](./local-proxy/com.dcm.ccproxy.plist.example)을 설치하세요 — 헤더
+주석에 `sed` 한 줄 + `launchctl load -w`가 있습니다. Tailscale IP(테일넷 전용)에 바인딩하고 KeepAlive가
+되살립니다. 안 하면 위 단순 실행은 노트북 잠자기/재부팅 시 죽습니다(그러면 봇은 API 키로 폴백).
+
 - **설계상 부분 커버**: 일반 대화는 구독으로 처리, `tools`/강제 `tool_choice`는 400을 반환해 봇이
   폴백합니다 — web_search는 여기서 텍스트로 강등되고 NL 라우터의 tool 호출은 API 키를 씁니다.
   claude 오류/타임아웃은 5xx → API 키 폴백.

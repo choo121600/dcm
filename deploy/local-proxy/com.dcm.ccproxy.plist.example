@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS LaunchAgent: keep claude_code_proxy.py alive (auto-start at login, restart on crash).
+     Install:
+       cp com.dcm.ccproxy.plist.example ~/Library/LaunchAgents/com.dcm.ccproxy.plist
+       # replace the three __PLACEHOLDERS__ with absolute paths, e.g.:
+       sed -i '' "s#__CLAUDE_BIN__#$HOME/.local/bin/claude#; s#__PYTHON3__#$(command -v python3)#; s#__PROXY_DIR__#$PWD#" \
+         ~/Library/LaunchAgents/com.dcm.ccproxy.plist
+       launchctl load -w ~/Library/LaunchAgents/com.dcm.ccproxy.plist
+     Binds the Tailscale IP (tailnet-only, no LAN exposure) and retries until Tailscale is up. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dcm.ccproxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>IP=$(/usr/local/bin/tailscale ip -4 2>/dev/null | head -1); if [ -z "$IP" ]; then echo "tailscale not ready"; exit 1; fi; export PROXY_HOST="$IP" PROXY_PORT=8787 CLAUDE_BIN=__CLAUDE_BIN__; exec __PYTHON3__ __PROXY_DIR__/claude_code_proxy.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/tmp/dcm-ccproxy.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/dcm-ccproxy.err.log</string>
+</dict>
+</plist>
