@@ -11,6 +11,8 @@ from dcm.config import Settings
 _ENV_KEYS = (
     "DISCORD_TOKEN", "ANTHROPIC_API_KEY", "ADMIN_GUILD_ID", "ADMIN_ROLE_ID",
     "WELCOME_CHANNEL_ID", "WELCOME_MESSAGE", "DEFAULT_ROLE_ID", "BOT_NAME",
+    "FALLBACK_BASE_URL", "FALLBACK_API_KEY",
+    "PREFER_PROXY", "PROXY_CONNECT_TIMEOUT", "PROXY_BREAKER_COOLDOWN",
 )
 
 _BASE = dict(discord_token="t", anthropic_api_key="k", admin_guild_id=111, admin_role_id=222)
@@ -59,3 +61,40 @@ def test_role_ids_coerced_to_int():
                  admin_guild_id="111", admin_role_id="222")
     assert s.admin_guild_id == 111
     assert s.admin_role_id == 222
+
+
+def test_fallback_proxy_defaults_empty():
+    s = Settings(_env_file=None, **_BASE)
+    assert s.fallback_base_url == ""
+    assert s.fallback_api_key == ""
+
+
+def test_fallback_proxy_fields_set_when_provided():
+    s = Settings(
+        _env_file=None,
+        **_BASE,
+        fallback_base_url="http://127.0.0.1:8787",
+        fallback_api_key="proxy-token",
+    )
+    assert s.fallback_base_url == "http://127.0.0.1:8787"
+    assert s.fallback_api_key == "proxy-token"
+
+
+def test_prefer_proxy_defaults():
+    s = Settings(_env_file=None, **_BASE)
+    assert s.prefer_proxy is False
+    assert s.proxy_connect_timeout == 2.0
+    assert s.proxy_breaker_cooldown == 30.0
+
+
+def test_prefer_proxy_fields_set_when_provided():
+    s = Settings(
+        _env_file=None,
+        **_BASE,
+        prefer_proxy=True,
+        proxy_connect_timeout=1.5,
+        proxy_breaker_cooldown=45,
+    )
+    assert s.prefer_proxy is True
+    assert s.proxy_connect_timeout == 1.5
+    assert s.proxy_breaker_cooldown == 45.0

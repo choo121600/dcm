@@ -141,6 +141,20 @@ accepts one key or several comma-separated keys forming a **pool** (spreads rate
 credential carries a non-secret `label`; **the key value is never logged** — only the label
 (§14.1).
 
+An optional **fallback endpoint** (`FALLBACK_BASE_URL`, plus `FALLBACK_API_KEY`) appends one more
+credential that is tried **only after every real key errors**. Any Anthropic Messages API-compatible
+target works — a second key, a Bedrock/Vertex gateway, or a self-hosted `/v1/messages` proxy — because
+each credential carries its own `base_url` and failover simply walks the credential list in order.
+
+**Local-first ordering.** Setting `PREFER_PROXY=true` inserts the proxy credential at the **front**
+instead of the back, so a reachable local proxy (e.g. a laptop CLI proxy on the tailnet) is used
+first and the real key becomes the offline fallback. Because a connection error is just another
+`APIError`, an unreachable proxy fails over transparently; a short `PROXY_CONNECT_TIMEOUT` bounds
+that failover and a small per-credential circuit breaker (`PROXY_BREAKER_COOLDOWN`) deprioritizes a
+proxy that just refused a connection, so an offline host doesn't tax every subsequent call. The bot
+process itself stays single-instance — this ordering is a property of the LLM layer, not a second
+deployment (see `deploy/README.md` → "Local-first LLM routing").
+
 ## 10. Internationalization (i18n)
 
 The bot's user-facing strings are **externalized from source** into locale catalogs so the bot

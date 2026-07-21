@@ -48,6 +48,21 @@ class Settings(BaseSettings):
     max_tokens: int = 600  # response cap (ARCHITECTURE.md §14.4)
     ingest_model: str = "claude-haiku-4-5-20251001"  # cheaper model for ingestion (ARCHITECTURE.md §12)
 
+    # LLM fallback proxy (optional) — an Anthropic Messages API-compatible endpoint tried only
+    # after every credential above errors (ARCHITECTURE.md §9.1 failover order). Empty → disabled.
+    # NOTE: what you put behind it is your call — a second real key or a Bedrock/Vertex endpoint is
+    # policy-safe; a Claude subscription-token proxy for an always-on bot can violate Anthropic's
+    # usage policy.
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""  # token the proxy expects; empty → reuse the primary key
+    # Local-first LLM routing (ARCHITECTURE.md §9.1). When true the fallback proxy above is used
+    # FIRST (e.g. a laptop-hosted CLI proxy reachable over Tailscale) and ANTHROPIC_API_KEY becomes
+    # the fallback for when that proxy host is offline. Default false → proxy stays last-resort.
+    prefer_proxy: bool = False
+    # Fast-failover tuning, applied to the proxy credential only when prefer_proxy is true:
+    proxy_connect_timeout: float = 2.0  # short TCP-connect bound so an offline proxy fails over fast
+    proxy_breaker_cooldown: float = 30.0  # after a connection failure, skip the proxy for N s (0 disables)
+
     # Abuse limits / context
     max_input_chars: int = 4000  # input cap (ARCHITECTURE.md §14.4)
     cooldown_seconds: float = 3.0  # per-user mention cooldown (ARCHITECTURE.md §14.4)

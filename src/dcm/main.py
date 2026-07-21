@@ -10,7 +10,7 @@ from .config import Settings
 from .embeddings import build_embedder
 from .leveling.service import LevelingService
 from .leveling.store import LevelingStore
-from .llm import LLMClient, parse_credentials
+from .llm import LLMClient, build_credentials
 from .logging_setup import setup_logging
 from .memory.ingest import IngestionPipeline
 from .memory.store import MemoryStore
@@ -40,7 +40,17 @@ async def _run() -> None:
     i18n.set_locale(settings.bot_locale)  # select the bot's user-facing language (ARCHITECTURE.md §10)
     log.info("locale: %s", i18n.get_locale())
 
-    creds = parse_credentials(settings.anthropic_api_key)
+    creds = build_credentials(
+        settings.anthropic_api_key,
+        fallback_base_url=settings.fallback_base_url,
+        fallback_api_key=settings.fallback_api_key,
+        prefer_proxy=settings.prefer_proxy,
+        proxy_connect_timeout=settings.proxy_connect_timeout,
+        proxy_breaker_cooldown=settings.proxy_breaker_cooldown,
+    )
+    if settings.prefer_proxy and settings.fallback_base_url:
+        # Local-first routing: the proxy is tried first, the API key is the offline fallback (§9.1).
+        log.info("LLM routing: local proxy preferred, API key fallback")
     log.info("loaded %d API credential(s)", len(creds))  # count only, never the key value
 
     llm = LLMClient(creds, model=settings.model, max_tokens=settings.max_tokens)

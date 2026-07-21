@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import anthropic
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -15,12 +17,48 @@ class Credential:
     api_key: str
     label: str
     org: str | None = None
+    base_url: str | None = None  # Messages API base override; None → default host (failover/proxy, §9.1)
+    # Fast-failover knobs for a local/proxy credential (ARCHITECTURE.md §9.1):
+    connect_timeout: float | None = None  # short TCP-connect bound so an unreachable host fails fast
+    breaker_cooldown: float = 0.0  # >0 → after a connection failure, deprioritize this credential for N s
 
 
 def parse_credentials(raw: str) -> list[Credential]:
     """Parse a comma-separated key string into the credential list (one key = pool of 1)."""
     keys = [k.strip() for k in raw.split(",") if k.strip()]
     return [Credential(api_key=k, label=f"key{i + 1}") for i, k in enumerate(keys)]
+
+
+def build_credentials(
+    api_keys: str,
+    *,
+    fallback_base_url: str = "",
+    fallback_api_key: str = "",
+    prefer_proxy: bool = False,
+    proxy_connect_timeout: float | None = None,
+    proxy_breaker_cooldown: float = 0.0,
+) -> list[Credential]:
+    """Assemble the failover-ordered credential list (ARCHITECTURE.md §9.1).
+
+    The real key(s) in `api_keys` (comma-separated → pool) are the baseline. An optional proxy
+    endpoint (`fallback_base_url`) is either appended as a last resort (default) or, when
+    `prefer_proxy` is set, inserted at the FRONT so a reachable local proxy is used first and the
+    API key becomes the fallback for when that proxy host is offline. The fast-failover knobs
+    (short connect timeout + circuit breaker) apply to the proxy only in prefer mode, so
+    last-resort behavior is unchanged.
+    """
+    creds = parse_credentials(api_keys)
+    if fallback_base_url:
+        primary_key = creds[0].api_key if creds else ""
+        proxy = Credential(
+            api_key=fallback_api_key or primary_key,
+            label="proxy",
+            base_url=fallback_base_url,
+            connect_timeout=proxy_connect_timeout if prefer_proxy else None,
+            breaker_cooldown=proxy_breaker_cooldown if prefer_proxy else 0.0,
+        )
+        creds.insert(0, proxy) if prefer_proxy else creds.append(proxy)
+    return creds
 
 
 class LLMClient:
@@ -36,9 +74,42 @@ class LLMClient:
         self._creds = creds
         self._model = model
         self._max_tokens = max_tokens
-        self._clients = {
-            c.label: anthropic.AsyncAnthropic(api_key=c.api_key) for c in creds
-        }
+        self._clients = {c.label: self._build_client(c) for c in creds}
+        # Circuit breaker: credential label → monotonic deadline until which it is deprioritized
+        # after a connection failure (§9.1); lazily (re)created by _breaker() for __new__ doubles.
+        self._open_until: dict[str, float] = {}
+
+    @staticmethod
+    def _build_client(cred: Credential) -> anthropic.AsyncAnthropic:
+        kwargs: dict = {"api_key": cred.api_key, "base_url": cred.base_url}
+        if cred.connect_timeout is not None:
+            # Bound only the TCP connect; leave read/write unbounded so long generations aren't cut.
+            kwargs["timeout"] = httpx.Timeout(None, connect=cred.connect_timeout)
+        return anthropic.AsyncAnthropic(**kwargs)
+
+    def _breaker(self) -> dict[str, float]:
+        # Lazy so hand-built test doubles (LLMClient.__new__) need no extra wiring.
+        breaker = self.__dict__.get("_open_until")
+        if breaker is None:
+            breaker = self.__dict__["_open_until"] = {}
+        return breaker
+
+    def _ordered(self) -> list[Credential]:
+        """Try-order for one call: credentials whose circuit is open sink to the back but are
+        still attempted last, so a transient outage never leaves a credential untried (§9.1)."""
+        breaker = self._breaker()
+        now = time.monotonic()
+        healthy: list[Credential] = []
+        cooling: list[Credential] = []
+        for cred in self._creds:
+            (cooling if now < breaker.get(cred.label, 0.0) else healthy).append(cred)
+        return healthy + cooling
+
+    def _record_failure(self, cred: Credential, exc: Exception) -> None:
+        """Open the circuit only for a genuine connectivity failure (host asleep/unreachable) on a
+        breaker-enabled credential — never for a 4xx/5xx from a live endpoint (§9.1)."""
+        if cred.breaker_cooldown > 0.0 and isinstance(exc, anthropic.APIConnectionError):
+            self._breaker()[cred.label] = time.monotonic() + cred.breaker_cooldown
 
     async def complete(
         self,
@@ -54,7 +125,7 @@ class LLMClient:
         Returns: (text, web_used) — the key is never written to logs (ARCHITECTURE.md §14.1).
         """
         last_error: Exception | None = None
-        for cred in self._creds:  # M1: single pass; pool: failover order
+        for cred in self._ordered():  # circuit-aware failover order (§9.1)
             client = self._clients[cred.label]
             try:
                 base_kwargs: dict = dict(
@@ -94,6 +165,7 @@ class LLMClient:
                     cred.label,
                     type(exc).__name__,
                 )
+                self._record_failure(cred, exc)
                 last_error = exc
                 continue
         raise RuntimeError("all credentials failed") from last_error
@@ -113,7 +185,7 @@ class LLMClient:
         complete() — label logged, key never logged (ARCHITECTURE.md §14.1).
         """
         last_error: Exception | None = None
-        for cred in self._creds:
+        for cred in self._ordered():
             client = self._clients[cred.label]
             try:
                 resp = await client.messages.create(
@@ -134,6 +206,7 @@ class LLMClient:
                     cred.label,
                     type(exc).__name__,
                 )
+                self._record_failure(cred, exc)
                 last_error = exc
                 continue
         raise RuntimeError("all credentials failed") from last_error

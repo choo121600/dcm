@@ -129,6 +129,59 @@ cd /opt/dcm && sudo -u dcm git pull && sudo -u dcm .venv/bin/pip install -e . \
   && sudo systemctl restart dcm
 ```
 
+## 4. Local-first LLM routing (optional)
+
+Run the LLM through a **proxy on your laptop when it's online**, and fall back to the server's
+`ANTHROPIC_API_KEY` **only when the laptop is off** (ARCHITECTURE.md §9.1). The bot itself stays a
+**single instance on this server** — do *not* run a second live bot on the laptop (one Discord
+gateway session per token; two writers would double-reply and split the SQLite state, §6).
+
+**How it works.** `LLMClient` tries credentials in order and fails over on any error, *including a
+connection error*. With `PREFER_PROXY=true` the proxy credential is placed **first**:
+
+- Laptop **on** → the proxy answers (cheap/local).
+- Laptop **off** → the proxy connection fails fast (short `PROXY_CONNECT_TIMEOUT`), the call fails
+  over to `ANTHROPIC_API_KEY`, and a circuit breaker skips the proxy for `PROXY_BREAKER_COOLDOWN`
+  seconds so later messages go straight to the API key with no per-message latency.
+
+### 4.1 On the laptop — run the proxy over Tailscale
+
+The proxy is reachable from this server over [Tailscale](https://tailscale.com), so the laptop
+opens **no inbound LAN ports**. A ready-made compose stack (proxy + Tailscale sidecar) lives in
+[`deploy/local-proxy/`](./local-proxy/):
+
+```bash
+cd deploy/local-proxy
+cp .env.example .env          # set TS_AUTHKEY + PROXY_IMAGE (+ your proxy's own settings)
+docker compose up -d
+docker compose exec tailscale tailscale ip -4   # note the tailnet IP (or use the MagicDNS name)
+```
+
+> The proxy must speak the **Anthropic Messages API** (`/v1/messages`) on port `8787` and accept
+> both `MODEL` and `INGEST_MODEL`. **Policy note (§9.1):** a second real key or a Bedrock/Vertex
+> gateway behind it is safe; fronting a Claude subscription token for an always-on bot can violate
+> Anthropic's usage policy — your call what you put behind `PROXY_IMAGE`.
+
+### 4.2 On this server — prefer the proxy
+
+Add to `/opt/dcm/.env`, then restart:
+
+```bash
+PREFER_PROXY=true
+FALLBACK_BASE_URL=http://dcm-local-proxy:8787   # MagicDNS name, or http://<laptop-tailnet-ip>:8787
+FALLBACK_API_KEY=                               # token the proxy expects; empty → reuse ANTHROPIC_API_KEY
+# PROXY_CONNECT_TIMEOUT=2.0                      # fast-failover connect bound (default 2s)
+# PROXY_BREAKER_COOLDOWN=30                      # skip the proxy for N s after a connection failure
+```
+
+```bash
+sudo systemctl restart dcm
+journalctl -u dcm -f   # startup logs "LLM routing: local proxy preferred, API key fallback"
+```
+
+Leave `PREFER_PROXY` unset (or `false`) to keep the classic behavior where `FALLBACK_BASE_URL` is a
+**last-resort** endpoint tried only after the real key errors.
+
 ## Notes
 
 - **24/7 is the host's responsibility**: Make sure the server does not go into sleep mode. systemd restarts the bot on crash/reboot.

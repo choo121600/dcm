@@ -1,0 +1,57 @@
+# Local-first LLM proxy for dcm (ARCHITECTURE.md §9.1).
+#
+# Runs on your LAPTOP — NOT the bot host. The bot lives on the 24/7 SSH server and, with
+# PREFER_PROXY=true, calls this proxy FIRST while the laptop is online, falling back to
+# ANTHROPIC_API_KEY when the laptop is off. Reachability is over Tailscale, so there are no
+# inbound ports opened on your laptop's LAN (keeps the "no inbound ports" posture, §14.5).
+#
+# Setup (on the laptop):
+#   cd deploy/local-proxy
+#   cp .env.example .env          # fill TS_AUTHKEY + PROXY_IMAGE (+ your proxy's own settings)
+#   docker compose up -d
+#   docker compose exec tailscale tailscale ip -4    # note the tailnet IP (or use MagicDNS name)
+#
+# Then on the SSH server's .env (the bot host):
+#   PREFER_PROXY=true
+#   FALLBACK_BASE_URL=http://dcm-local-proxy:8787    # MagicDNS name, or http://<tailnet-ip>:8787
+#   FALLBACK_API_KEY=<token your proxy expects>      # empty → reuse ANTHROPIC_API_KEY
+#
+# Policy note (§9.1): a second real key or a Bedrock/Vertex gateway behind the proxy is safe;
+# fronting a Claude subscription token for an always-on bot can violate Anthropic's usage policy.
+# What you run as PROXY_IMAGE is your call.
+
+services:
+  # Tailscale node: gives the proxy a stable tailnet address the server can dial, with no
+  # LAN inbound ports. Reuse an auth key from the Tailscale admin console.
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: dcm-local-proxy            # → MagicDNS name the bot host dials
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env (Tailscale admin → Settings → Keys)}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  # Your Anthropic Messages API-compatible proxy (a /v1/messages endpoint). Bring your own image:
+  # it MUST listen on :8787 and accept BOTH the conversation model (MODEL) and the cheap ingest
+  # model (INGEST_MODEL) the bot sends — otherwise those calls fail over to the API key.
+  proxy:
+    image: ${PROXY_IMAGE:?set PROXY_IMAGE in .env to your /v1/messages proxy image}
+    # Share the Tailscale node's network namespace so the proxy is reachable at the tailnet IP:8787.
+    network_mode: service:tailscale
+    env_file:
+      # Optional so a fresh checkout validates before you create .env; loaded when present.
+      - path: .env
+        required: false
+    depends_on:
+      - tailscale
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:

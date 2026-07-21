@@ -140,6 +140,19 @@ orchestrator.py  ── library-agnostic core  (§2)
 각 자격 증명은 비밀이 아닌 `label`을 가지며, **키 값은 절대 로그에 남지 않습니다** — 오직
 레이블만 남습니다(§14.1).
 
+선택적 **폴백 엔드포인트**(`FALLBACK_BASE_URL` 및 `FALLBACK_API_KEY`)는 자격 증명을 하나 더 덧붙이며
+**실제 키가 모두 오류를 낸 뒤에만** 시도됩니다. Anthropic Messages API 호환 대상이면 무엇이든 됩니다 —
+두 번째 키, Bedrock/Vertex 게이트웨이, 자체 호스팅 `/v1/messages` 프록시 등. 각 자격 증명이 자체
+`base_url`을 가지므로, 폴백은 그저 자격 증명 목록을 순서대로 훑는 것입니다.
+
+**로컬 우선 순서.** `PREFER_PROXY=true`로 설정하면 프록시 자격 증명이 뒤가 아니라 **맨 앞**에
+삽입되어, 접근 가능한 로컬 프록시(예: tailnet 위의 노트북 CLI 프록시)를 먼저 사용하고 실제 키는
+오프라인 폴백이 됩니다. 연결 실패도 결국 하나의 `APIError`이므로 접근 불가한 프록시는 투명하게
+폴백되며, 짧은 `PROXY_CONNECT_TIMEOUT`이 그 폴백 시간을 제한하고, 자격 증명별 소형 서킷 브레이커
+(`PROXY_BREAKER_COOLDOWN`)가 방금 연결을 거부한 프록시를 후순위로 내려 오프라인 호스트가 이후 모든
+호출에 부담을 주지 않게 합니다. 봇 프로세스 자체는 단일 인스턴스로 유지됩니다 — 이 순서는 두 번째
+배포가 아니라 LLM 계층의 속성입니다(`deploy/README.md` → "Local-first LLM routing" 참고).
+
 ## 10. Internationalization (i18n)
 
 봇의 사용자 대상 문자열은 코드 변경 없이 선택한 언어로 말할 수 있도록 **소스에서 분리되어**

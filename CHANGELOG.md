@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   category's chat channel (matched via `study_lookup`), announcing the confirmed schedule (or
   asking to coordinate with the mentor when unconfirmed) and requesting progress screenshots.
   Curated schedules live in `service/study_schedule.py`; defaults to a no-ping preview.
+- Local-first LLM routing: `PREFER_PROXY=true` puts the `FALLBACK_BASE_URL` proxy first (e.g. a
+  laptop CLI proxy reachable over Tailscale) with `ANTHROPIC_API_KEY` as the offline fallback.
+  A short `PROXY_CONNECT_TIMEOUT` and a per-credential circuit breaker (`PROXY_BREAKER_COOLDOWN`)
+  make failover fast and penalty-free when the proxy host is off. Ships a laptop compose stack
+  (proxy + Tailscale sidecar) under `deploy/local-proxy/`. The bot stays single-instance.
 
 ### Changed
 - Code comments and docstrings translated to English throughout `src/`.
