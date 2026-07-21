@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   laptop CLI proxy reachable over Tailscale) with `ANTHROPIC_API_KEY` as the offline fallback.
   A short `PROXY_CONNECT_TIMEOUT` and a per-credential circuit breaker (`PROXY_BREAKER_COOLDOWN`)
   make failover fast and penalty-free when the proxy host is off. Ships a laptop compose stack
-  (proxy + Tailscale sidecar) under `deploy/local-proxy/`. The bot stays single-instance.
+  (proxy + Tailscale sidecar) under `deploy/local-proxy/`, plus a native `claude_code_proxy.py`
+  that fronts a Claude Code subscription via `claude -p` (conversation only; tool/web_search calls
+  fail over to the API key). The bot stays single-instance.
 
 ### Changed
 - Code comments and docstrings translated to English throughout `src/`.

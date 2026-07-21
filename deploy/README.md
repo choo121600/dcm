@@ -144,10 +144,36 @@ connection error*. With `PREFER_PROXY=true` the proxy credential is placed **fir
   over to `ANTHROPIC_API_KEY`, and a circuit breaker skips the proxy for `PROXY_BREAKER_COOLDOWN`
   seconds so later messages go straight to the API key with no per-message latency.
 
-### 4.1 On the laptop — run the proxy over Tailscale
+Two ways to run the local endpoint. Both expose an Anthropic `/v1/messages` service the server
+dials over [Tailscale](https://tailscale.com) — the laptop opens **no inbound LAN ports**.
 
-The proxy is reachable from this server over [Tailscale](https://tailscale.com), so the laptop
-opens **no inbound LAN ports**. A ready-made compose stack (proxy + Tailscale sidecar) lives in
+### 4.1 Option A — your Claude Code subscription (native)
+
+Uses the laptop's **Claude Code subscription** via a tiny host script,
+[`local-proxy/claude_code_proxy.py`](./local-proxy/claude_code_proxy.py). It shells out to
+`claude -p`, so it must run **natively (not in Docker)** — Docker can't reach the macOS
+Keychain/OAuth session.
+
+```bash
+claude login                                     # once: establish the subscription session
+cd deploy/local-proxy
+PROXY_HOST=$(tailscale ip -4) python3 claude_code_proxy.py   # binds your tailnet IP:8787
+```
+
+- **Partial coverage by design:** plain conversation is served by your subscription; `tools` and
+  forced `tool_choice` return 400 so the bot fails over — web_search degrades to text here and the
+  NL router's tool call uses the API key. Any claude error/timeout → 5xx → API-key fallback.
+- **Policy (§9.1):** since the **June 15 2026 reversal**, programmatic use draws from your normal
+  Pro/Max limits again — but it is volatile and high-volume/abuse patterns still risk account
+  action. Keep volume sane; unset `PREFER_PROXY` on the server to disable instantly. Prefer this
+  **official `claude -p`** path over harness-spoofing proxies (CLIProxyAPI-style) — those are the
+  ones that got accounts banned.
+- **Rate limits:** a 24/7 bot can exhaust subscription windows; the bot then falls back to the key.
+
+### 4.2 Option B — containerized proxy (LiteLLM / local model)
+
+For a policy-safe gateway in front of **your own API key**, a **Bedrock/Vertex** endpoint, or a
+**local OSS model** (Ollama, etc.). A compose stack (proxy + Tailscale sidecar) lives in
 [`deploy/local-proxy/`](./local-proxy/):
 
 ```bash
@@ -157,12 +183,10 @@ docker compose up -d
 docker compose exec tailscale tailscale ip -4   # note the tailnet IP (or use the MagicDNS name)
 ```
 
-> The proxy must speak the **Anthropic Messages API** (`/v1/messages`) on port `8787` and accept
-> both `MODEL` and `INGEST_MODEL`. **Policy note (§9.1):** a second real key or a Bedrock/Vertex
-> gateway behind it is safe; fronting a Claude subscription token for an always-on bot can violate
-> Anthropic's usage policy — your call what you put behind `PROXY_IMAGE`.
+> The proxy must speak the **Anthropic Messages API** (`/v1/messages`) and accept both `MODEL` and
+> `INGEST_MODEL`. A second real key or a Bedrock/Vertex gateway is policy-safe.
 
-### 4.2 On this server — prefer the proxy
+### 4.3 On this server — prefer the proxy
 
 Add to `/opt/dcm/.env`, then restart:
 

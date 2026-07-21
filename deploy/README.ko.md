@@ -144,10 +144,35 @@ writer가 둘이면 이중 응답 + SQLite 상태 분리, §6).
   `ANTHROPIC_API_KEY`로 폴백하며, 서킷 브레이커가 `PROXY_BREAKER_COOLDOWN`초 동안 프록시를 건너뛰어
   이후 메시지는 메시지당 지연 없이 곧장 API 키로 갑니다.
 
-### 4.1 노트북 — Tailscale로 프록시 실행
+로컬 엔드포인트를 띄우는 방법은 둘. 둘 다 서버가 [Tailscale](https://tailscale.com)로 다이얼하는
+Anthropic `/v1/messages` 서비스를 노출하고 — 노트북은 **LAN 인바운드 포트를 열지 않습니다.**
 
-프록시는 [Tailscale](https://tailscale.com)로 이 서버에서 접근되므로 노트북은 **LAN 인바운드 포트를
-열지 않습니다.** 바로 쓸 수 있는 compose 스택(프록시 + Tailscale 사이드카)이
+### 4.1 옵션 A — 내 Claude Code 구독 (네이티브)
+
+노트북의 **Claude Code 구독**을 얇은 호스트 스크립트
+[`local-proxy/claude_code_proxy.py`](./local-proxy/claude_code_proxy.py)로 사용합니다. `claude -p`를
+호출하므로 **Docker가 아니라 네이티브로** 돌려야 합니다 — Docker는 macOS Keychain/OAuth 세션에
+접근할 수 없습니다.
+
+```bash
+claude login                                     # 최초 1회: 구독 세션 생성
+cd deploy/local-proxy
+PROXY_HOST=$(tailscale ip -4) python3 claude_code_proxy.py   # tailnet IP:8787에 바인딩
+```
+
+- **설계상 부분 커버**: 일반 대화는 구독으로 처리, `tools`/강제 `tool_choice`는 400을 반환해 봇이
+  폴백합니다 — web_search는 여기서 텍스트로 강등되고 NL 라우터의 tool 호출은 API 키를 씁니다.
+  claude 오류/타임아웃은 5xx → API 키 폴백.
+- **정책(§9.1)**: **6월 15일 되돌림** 이후 프로그램적 사용은 다시 일반 Pro/Max 한도에서 차감됩니다 —
+  단 변동성이 크고 고볼륨/어뷰즈 패턴은 여전히 계정 조치 위험이 있습니다. 볼륨을 적당히 하고,
+  서버에서 `PREFER_PROXY`를 끄면 즉시 비활성화됩니다. harness 스푸핑 프록시(CLIProxyAPI류)보다 **공식
+  `claude -p`** 경로를 우선하세요 — 밴이 난 건 그 스푸핑 쪽입니다.
+- **레이트리밋**: 24/7 봇은 구독 윈도우를 소진할 수 있고, 그러면 봇이 키로 폴백합니다.
+
+### 4.2 옵션 B — 컨테이너 프록시 (LiteLLM / 로컬 모델)
+
+**내 API 키**, **Bedrock/Vertex** 엔드포인트, 또는 **로컬 OSS 모델**(Ollama 등) 앞단의 정책-안전
+게이트웨이용입니다. compose 스택(프록시 + Tailscale 사이드카)이
 [`deploy/local-proxy/`](./local-proxy/)에 있습니다:
 
 ```bash
@@ -157,12 +182,10 @@ docker compose up -d
 docker compose exec tailscale tailscale ip -4   # tailnet IP 확인(또는 MagicDNS 이름 사용)
 ```
 
-> 프록시는 포트 `8787`에서 **Anthropic Messages API**(`/v1/messages`)를 말해야 하며 `MODEL`과
-> `INGEST_MODEL`을 모두 처리해야 합니다. **정책 주의(§9.1):** 두 번째 실제 키나 Bedrock/Vertex
-> 게이트웨이를 두는 것은 안전하지만, 상시 가동 봇에 Claude 구독 토큰을 씌우는 것은 Anthropic 사용
-> 정책 위반이 될 수 있습니다 — `PROXY_IMAGE`에 무엇을 두는지는 본인 판단입니다.
+> 프록시는 **Anthropic Messages API**(`/v1/messages`)를 말하고 `MODEL`과 `INGEST_MODEL`을 모두
+> 처리해야 합니다. 두 번째 실제 키나 Bedrock/Vertex 게이트웨이는 정책상 안전합니다.
 
-### 4.2 서버 — 프록시 우선 설정
+### 4.3 서버 — 프록시 우선 설정
 
 `/opt/dcm/.env`에 추가하고 재시작하십시오:
 
